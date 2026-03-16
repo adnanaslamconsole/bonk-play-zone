@@ -1,0 +1,151 @@
+@import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;600;700;800;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 270 60% 12%;
+    --foreground: 0 0% 98%;
+
+    --card: 270 50% 16%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 270 50% 16%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 45 100% 55%;
+    --primary-foreground: 270 60% 12%;
+
+    --secondary: 320 80% 55%;
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 270 40% 22%;
+    --muted-foreground: 270 20% 65%;
+
+    --accent: 170 80% 50%;
+    --accent-foreground: 270 60% 12%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 270 40% 25%;
+    --input: 270 40% 25%;
+    --ring: 45 100% 55%;
+
+    --radius: 1rem;
+
+    /* Custom game tokens */
+    --game-pink: 320 80% 55%;
+    --game-cyan: 170 80% 50%;
+    --game-orange: 25 100% 55%;
+    --game-green: 140 70% 50%;
+    --game-blue: 220 80% 55%;
+    --game-red: 0 80% 55%;
+    --game-yellow: 45 100% 55%;
+    --game-purple: 280 80% 60%;
+
+    --gradient-hero: linear-gradient(135deg, hsl(280 80% 40%), hsl(320 80% 50%), hsl(45 100% 55%));
+    --gradient-card: linear-gradient(145deg, hsl(270 50% 18%), hsl(270 50% 14%));
+    --gradient-glow: radial-gradient(circle, hsl(320 80% 55% / 0.3), transparent 70%);
+
+    --shadow-neon: 0 0 30px hsl(320 80% 55% / 0.4), 0 0 60px hsl(320 80% 55% / 0.2);
+    --shadow-gold: 0 0 20px hsl(45 100% 55% / 0.4), 0 0 40px hsl(45 100% 55% / 0.2);
+
+    --font-display: 'Fredoka', sans-serif;
+    --font-body: 'Nunito', sans-serif;
+
+    --sidebar-background: 270 50% 10%;
+    --sidebar-foreground: 0 0% 98%;
+    --sidebar-primary: 45 100% 55%;
+    --sidebar-primary-foreground: 270 60% 12%;
+    --sidebar-accent: 270 40% 22%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 270 40% 25%;
+    --sidebar-ring: 45 100% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-body);
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+  }
+}
+
+@layer utilities {
+  .text-gradient-hero {
+    background: var(--gradient-hero);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .bg-gradient-card {
+    background: var(--gradient-card);
+  }
+  .shadow-neon {
+    box-shadow: var(--shadow-neon);
+  }
+  .shadow-gold {
+    box-shadow: var(--shadow-gold);
+  }
+  .bg-game-pink { background-color: hsl(var(--game-pink)); }
+  .bg-game-cyan { background-color: hsl(var(--game-cyan)); }
+  .bg-game-orange { background-color: hsl(var(--game-orange)); }
+  .bg-game-green { background-color: hsl(var(--game-green)); }
+  .bg-game-blue { background-color: hsl(var(--game-blue)); }
+  .bg-game-red { background-color: hsl(var(--game-red)); }
+  .bg-game-yellow { background-color: hsl(var(--game-yellow)); }
+  .bg-game-purple { background-color: hsl(var(--game-purple)); }
+  .text-game-pink { color: hsl(var(--game-pink)); }
+  .text-game-cyan { color: hsl(var(--game-cyan)); }
+  .text-game-orange { color: hsl(var(--game-orange)); }
+  .text-game-green { color: hsl(var(--game-green)); }
+  .text-game-yellow { color: hsl(var(--game-yellow)); }
+  .text-game-purple { color: hsl(var(--game-purple)); }
+  .text-game-blue { color: hsl(var(--game-blue)); }
+  .border-game-pink { border-color: hsl(var(--game-pink)); }
+  .border-game-cyan { border-color: hsl(var(--game-cyan)); }
+  .border-game-yellow { border-color: hsl(var(--game-yellow)); }
+
+  .lock-scroller {
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+    height: 100%;
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: auto;
+    touch-action: none;
+  }
+}
+
+  .animate-shimmer {
+    animation: shimmer 1.5s infinite linear;
+    background-size: 200% 100%;
+  }
+
+  .animate-pulse-gentle {
+    animation: pulse-gentle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+@keyframes pulse-gentle {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.05); }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes shimmer-slow {
+  0% { transform: translateX(-200%); }
+  100% { transform: translateX(200%); }
+}
