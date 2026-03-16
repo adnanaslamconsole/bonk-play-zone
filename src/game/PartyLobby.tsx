@@ -16,55 +16,102 @@ export default function PartyLobby({ playerChar, playerName, onGameStart, onBack
   const [mode, setMode] = useState<'select' | 'hosting' | 'joining'>(networkManager.role === 'host' ? 'hosting' : networkManager.role === 'client' ? 'joining' : 'select');
   const [copied, setCopied] = useState(false);
 
+  const [timeLeft, setTimeLeft] = useState<number>(300); // 5 minutes in seconds
+
   useEffect(() => {
     // Check if there is a room in the URL and auto-join
     const urlParams = new URLSearchParams(window.location.search);
     const urlRoom = urlParams.get('room');
     if (urlRoom && mode === 'select' && joinCode === '') {
-      const code = urlRoom.toUpperCase();
+      const code = urlRoom;
       setJoinCode(code);
       setMode('joining');
-      networkManager.connect();
-      networkManager.joinRoom(code, playerName, playerChar);
+      const join = async () => {
+        try {
+          await networkManager.joinRoom(code, playerName, playerChar);
+        } catch (err) {
+          console.error("Failed to auto-join", err);
+          alert("Lobby not found or expired.");
+          setMode('select');
+        }
+      };
+      join();
     }
   }, [mode, joinCode, playerName, playerChar]);
+
+  useEffect(() => {
+    // Timer Logic
+    let interval: any;
+    if (mode !== 'select') {
+      interval = setInterval(() => {
+        setTimeLeft(prev => {
+          if (prev <= 0) return 0;
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      setTimeLeft(300);
+    }
+    return () => clearInterval(interval);
+  }, [mode]);
 
   useEffect(() => {
     // Setup network callbacks
     networkManager.onLobbyUpdate = (newPlayers) => {
       console.log('[Lobby] Received update:', newPlayers);
-      setPlayers(newPlayers);
+      setPlayers([...newPlayers]); // force new reference
     };
 
     networkManager.onGameStart = () => {
       onGameStart();
     };
 
+    networkManager.onLobbyExpired = () => {
+      alert("Time expired\nNo game was started\nReturning to home screen");
+      handleLeave();
+    };
+
     return () => {
       networkManager.onLobbyUpdate = null;
       networkManager.onGameStart = null;
+      networkManager.onLobbyExpired = null;
     };
   }, [onGameStart]);
 
-  const handleHost = () => {
+  const handleHost = async () => {
     setMode('hosting');
-    networkManager.connect();
-    const code = networkManager.createRoom(playerName, playerChar);
-    setRoomCode(code);
+    try {
+      const code = await networkManager.createRoom(playerName, playerChar);
+      setRoomCode(code);
+    } catch (err) {
+      console.error("Failed to create room", err);
+      setMode('select');
+    }
   };
 
-  const handleJoin = () => {
-    if (joinCode.length !== 4) return;
+  const handleJoin = async () => {
+    if (!joinCode) return;
     setMode('joining');
-    networkManager.connect();
-    networkManager.joinRoom(joinCode, playerName, playerChar);
+    try {
+      await networkManager.joinRoom(joinCode, playerName, playerChar);
+    } catch (err) {
+      console.error("Failed to join room", err);
+      alert("Lobby not found or expired.");
+      setMode('select');
+    }
   };
 
   const handleLeave = () => {
     networkManager.disconnect();
     setMode('select');
     setRoomCode('');
+    setJoinCode('');
     setPlayers([]);
+    setTimeLeft(300);
+    // Remove ?room= from URL without reloading
+    const url = new URL(window.location.href);
+    url.searchParams.delete('room');
+    window.history.pushState({}, '', url.toString());
   };
 
   const startActualGame = () => {
@@ -110,16 +157,15 @@ export default function PartyLobby({ playerChar, playerName, onGameStart, onBack
             <div className="flex gap-2">
               <input 
                 type="text" 
-                placeholder="ROOM CODE" 
-                maxLength={4}
+                placeholder="ROOM CONNECTION ID" 
                 value={joinCode}
-                onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                className="w-full bg-background border-2 border-border rounded-xl px-4 py-3 text-center text-xl font-bold text-foreground placeholder-muted-foreground uppercase outline-none focus:border-primary transition-colors"
-                style={{ fontFamily: 'monospace', letterSpacing: '4px' }}
+                onChange={(e) => setJoinCode(e.target.value)}
+                className="w-full bg-background border-2 border-border rounded-xl px-4 py-3 text-center sm:text-lg font-bold text-foreground placeholder-muted-foreground outline-none focus:border-primary transition-colors overflow-hidden text-ellipsis whitespace-nowrap"
+                style={{ fontFamily: 'monospace' }}
               />
               <button 
                 onClick={handleJoin}
-                disabled={joinCode.length !== 4}
+                disabled={joinCode.length < 3}
                 className="px-6 rounded-xl bg-secondary text-secondary-foreground font-bold shadow-neon disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed hover:scale-105 active:scale-95 transition-all"
               >
                 JOIN
@@ -151,9 +197,9 @@ export default function PartyLobby({ playerChar, playerName, onGameStart, onBack
           </button>
           
           <div className="bg-card border-2 border-primary/50 shadow-neon px-4 py-3 rounded-2xl flex items-center justify-between sm:justify-start gap-4 relative flex-1 max-w-md mx-auto sm:mx-0">
-            <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4">
-              <span className="text-muted-foreground font-bold text-[10px] sm:text-xs uppercase tracking-[2px]">Room Code</span>
-              <span className="text-2xl sm:text-3xl font-bold text-primary tracking-[4px] sm:tracking-[8px] font-mono leading-none">{networkManager.roomId}</span>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 overflow-hidden">
+              <span className="text-muted-foreground font-bold text-[10px] sm:text-xs uppercase tracking-[2px]">Invite Link</span>
+              <span className="text-sm sm:text-base font-bold text-primary tracking-[1px] font-mono leading-none truncate max-w-[150px] sm:max-w-xs">{networkManager.roomId}</span>
             </div>
             <button 
               onClick={copyInviteLink}
@@ -164,6 +210,13 @@ export default function PartyLobby({ playerChar, playerName, onGameStart, onBack
               {copied ? 'COPIED!' : '🔗 COPY LINK'}
             </button>
           </div>
+        </div>
+        
+        {/* Timer UI */}
+        <div className="text-center mb-6">
+           <span className="text-xl font-bold font-mono text-primary bg-primary/10 px-4 py-2 rounded-xl border border-primary/20 shadow-neon">
+             Game starts in: {Math.floor(timeLeft / 60).toString().padStart(2, '0')}:{(timeLeft % 60).toString().padStart(2, '0')}
+           </span>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">

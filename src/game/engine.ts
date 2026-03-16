@@ -71,7 +71,7 @@ export function createInitialState(
 
   if (isMultiplayer && networkManager.role !== "offline") {
     const networkPlayers = networkManager.playersInRoom;
-    const slots = Math.max(totalSlots, networkPlayers.length);
+    const slots = networkPlayers.length; // strictly the number of actual network players
 
     // Spawn Humans
     networkPlayers.forEach((lobbyPlayer, i) => {
@@ -90,30 +90,6 @@ export function createInitialState(
         ),
       );
     });
-
-    // Fill remaining with Bots
-    if (players.length < slots) {
-      const existingCharIds = networkPlayers.map((p) => p.character.id);
-      const botChars = CHARACTERS.filter(
-        (c) => !existingCharIds.includes(c.id),
-      );
-      for (let i = players.length; i < slots; i++) {
-        const pos = getSpawnPoint(i, slots, arenaR);
-        const bc = botChars[i % botChars.length] || CHARACTERS[0];
-        players.push(
-          createPlayer(
-            `bot-${i}`,
-            `Robot ${i + 1}`,
-            pos.x,
-            pos.y,
-            bc.color,
-            bc.eyeColor,
-            false,
-            playerRadius,
-          ),
-        );
-      }
-    }
   } else {
     // Single-player mode scaling
     const playerPos = getSpawnPoint(0, totalSlots, arenaR);

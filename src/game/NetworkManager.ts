@@ -1,5 +1,6 @@
 import { GameState, Player, Vec2 } from './types';
 import { CharacterDef } from './characters';
+import Peer, { DataConnection } from 'peerjs';
 
 export type NetworkRole = 'host' | 'client' | 'offline';
 
@@ -20,7 +21,10 @@ class NetworkManager {
   public role: NetworkRole = 'offline';
   public roomId: string | null = null;
   public playerId: string | null = null;
-  private channel: BroadcastChannel | null = null;
+  
+  private peer: Peer | null = null;
+  private connections: Map<string, DataConnection> = new Map();
+  private hostConnection: DataConnection | null = null;
   
   // Lobby state
   public playersInRoom: { id: string, name: string, character: CharacterDef }[] = [];
@@ -30,172 +34,236 @@ class NetworkManager {
   
   // Remote State (Client receives this)
   public lastReceivedState: GameState | null = null;
-  private lobbyInterval: any = null;
-  private joinInterval: any = null;
+  
+  // Lobby Expiration
+  public lobbyCreationTime: number | null = null;
+  public lobbyExpired = false;
+  private expirationTimer: any = null;
 
   // Callbacks
   public onLobbyUpdate: ((players: any[]) => void) | null = null;
   public onGameStart: (() => void) | null = null;
+  public onLobbyExpired: (() => void) | null = null;
+  public onPeerInitialized: ((id: string) => void) | null = null;
   
-  connect() {
-    if (this.channel) return;
-    this.channel = new BroadcastChannel('bonkstars_multiplayer');
-    
-    this.channel.onmessage = (event) => {
-      const { type, data, roomId } = event.data;
-      
-      // If we have a room ID set, filter out messages for other rooms
-      if (this.roomId && roomId && roomId !== this.roomId) return;
+  createRoom(hostName: string, hostChar: CharacterDef): Promise<string> {
+    return new Promise((resolve, reject) => {
+      this.role = 'host';
+      this.peer = new Peer({ debug: 2 });
 
-      switch (type) {
-        case 'JOIN_REQUEST':
-          if (this.role === 'host' && data.roomId === this.roomId) {
-            this.handleJoinRequest(data.player);
+      this.peer.on('open', (id) => {
+        this.roomId = id;
+        this.playerId = 'host-' + id;
+        this.playersInRoom = [{ id: this.playerId, name: hostName, character: hostChar }];
+        this.lobbyCreationTime = Date.now();
+        this.lobbyExpired = false;
+        
+        console.log(`[Network] Peer created with ID: ${id}`);
+        if (this.onPeerInitialized) this.onPeerInitialized(id);
+        if (this.onLobbyUpdate) this.onLobbyUpdate(this.playersInRoom);
+
+        // Start 5-minute timer
+        this.expirationTimer = setTimeout(() => {
+          if (this.playersInRoom.length > 0 && this.lastReceivedState === null && this.role === 'host') {
+             // Game hasn't started yet and we are the host. If we were simulating state, lastReceivedState would remain null since only clients receive state this way. But wait, host doesn't receive state. A better check is if game has started via a flag. Let's add a simple flag.
           }
-          break;
-        case 'LOBBY_UPDATE':
-          if (this.role === 'client') {
-            const players = data;
+        }, 5 * 60 * 1000);
+
+        resolve(id);
+      });
+
+      this.peer.on('connection', (conn) => {
+        this.setupHostConnection(conn);
+      });
+
+      this.peer.on('error', (err) => {
+        console.error('[Network] PeerJS Error:', err);
+        reject(err);
+      });
+    });
+  }
+
+  private gameStarted = false;
+
+  private startExpirationTimer() {
+    this.gameStarted = false;
+    this.lobbyExpired = false;
+    if (this.expirationTimer) clearTimeout(this.expirationTimer);
+    
+    this.expirationTimer = setTimeout(() => {
+      if (!this.gameStarted) {
+        this.expireLobby();
+      }
+    }, 5 * 60 * 1000); // 5 minutes
+  }
+
+  private expireLobby() {
+    console.log('[Network] Lobby expired.');
+    this.lobbyExpired = true;
+    this.broadcastToClients({ type: 'LOBBY_EXPIRED' });
+    if (this.onLobbyExpired) this.onLobbyExpired();
+    this.disconnect();
+  }
+
+  private setupHostConnection(conn: DataConnection) {
+    conn.on('open', () => {
+      console.log(`[Network] Client connected: ${conn.peer}`);
+      
+      if (this.lobbyExpired || this.gameStarted) {
+         conn.send({ type: 'ROOM_CLOSED' });
+         setTimeout(() => conn.close(), 500);
+         return;
+      }
+      
+      this.connections.set(conn.peer, conn);
+    });
+
+    conn.on('data', (data: any) => {
+      if (data.type === 'JOIN_REQUEST') {
+        const existing = this.playersInRoom.find(p => p.id === data.player.id);
+        if (!existing) {
+          console.log('[Network] New player joined:', data.player.name);
+          this.playersInRoom = [...this.playersInRoom, data.player];
+          if (this.onLobbyUpdate) this.onLobbyUpdate(this.playersInRoom);
+        }
+        this.broadcastToClients({ type: 'LOBBY_UPDATE', players: this.playersInRoom });
+      }
+      else if (data.type === 'PLAYER_INPUT') {
+        this.remoteInputs[data.id] = data.input;
+      }
+    });
+
+    conn.on('close', () => {
+      console.log(`[Network] Client disconnected: ${conn.peer}`);
+      this.connections.delete(conn.peer);
+      // Remove from players array by finding the player ID formatted client-{peerId}
+      const pId = 'client-' + conn.peer;
+      this.playersInRoom = this.playersInRoom.filter(p => p.id !== pId);
+      if (this.onLobbyUpdate) this.onLobbyUpdate(this.playersInRoom);
+      this.broadcastToClients({ type: 'LOBBY_UPDATE', players: this.playersInRoom });
+    });
+  }
+
+  joinRoom(roomId: string, clientName: string, clientChar: CharacterDef): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.role = 'client';
+      this.roomId = roomId;
+      this.peer = new Peer({ debug: 2 });
+
+      this.peer.on('open', (id) => {
+        this.playerId = 'client-' + id;
+        console.log(`[Network] Connected as ${this.playerId}, joining room ${roomId}`);
+        
+        const conn = this.peer!.connect(roomId, { reliable: true });
+        this.hostConnection = conn;
+
+        conn.on('open', () => {
+          this.playersInRoom = [{ id: this.playerId!, name: clientName, character: clientChar }];
+          conn.send({
+            type: 'JOIN_REQUEST',
+            player: {
+              id: this.playerId,
+              name: clientName,
+              character: clientChar
+            }
+          });
+          resolve();
+        });
+
+        conn.on('data', (data: any) => {
+          if (data.type === 'LOBBY_UPDATE') {
+            const players = data.players;
             if (JSON.stringify(players) !== JSON.stringify(this.playersInRoom)) {
               console.log('[Network] Lobby updated:', players);
               this.playersInRoom = players;
               if (this.onLobbyUpdate) this.onLobbyUpdate(this.playersInRoom);
             }
           }
-          break;
-        case 'GAME_START':
-          if (this.role === 'client') {
+          else if (data.type === 'GAME_START') {
             console.log('[Network] Game starting!');
             if (this.onGameStart) this.onGameStart();
           }
-          break;
-        case 'PLAYER_INPUT':
-          if (this.role === 'host') {
-            this.remoteInputs[data.id] = data.input;
+          else if (data.type === 'GAME_STATE') {
+            this.lastReceivedState = data.state;
           }
-          break;
-        case 'GAME_STATE':
-          if (this.role === 'client') {
-            this.lastReceivedState = data;
+          else if (data.type === 'ROOM_CLOSED' || data.type === 'LOBBY_EXPIRED') {
+             console.log('[Network] Room closed/expired by host');
+             if (data.type === 'LOBBY_EXPIRED' && this.onLobbyExpired) {
+               this.onLobbyExpired();
+             }
+             this.disconnect();
+             if (this.onLobbyUpdate) this.onLobbyUpdate([]);
           }
-          break;
-        case 'ROOM_CLOSED':
-          if (this.role === 'client') {
-            console.log('[Network] Room closed by host');
-            this.disconnect();
-            if (this.onLobbyUpdate) this.onLobbyUpdate([]);
-          }
-          break;
-      }
-    };
-  }
+        });
 
-  createRoom(hostName: string, hostChar: CharacterDef): string {
-    this.role = 'host';
-    const code = Math.random().toString(36).substring(2, 6).toUpperCase();
-    this.roomId = code;
-    this.playerId = 'host-' + Math.random().toString(36).substring(2, 6);
-    
-    this.playersInRoom = [{ id: this.playerId, name: hostName, character: hostChar }];
-    
-    // Periodically broadcast lobby state so late-joining clients see it
-    if (this.lobbyInterval) clearInterval(this.lobbyInterval);
-    this.lobbyInterval = setInterval(() => {
-      this.sendToChannel('LOBBY_UPDATE', this.playersInRoom);
-    }, 500); // 2Hz heartbeat
-
-    if (this.onLobbyUpdate) this.onLobbyUpdate(this.playersInRoom);
-    return code;
-  }
-
-  joinRoom(code: string, clientName: string, clientChar: CharacterDef) {
-    this.role = 'client';
-    this.roomId = code.toUpperCase();
-    this.playerId = 'client-' + Math.random().toString(36).substring(2, 6);
-    this.playersInRoom = [{ id: this.playerId, name: clientName, character: clientChar }]; 
-    
-    console.log(`[Network] Joining room ${this.roomId} as ${clientName}...`);
-    
-    // Periodically send join request until we are accepted (see ourselves in lobby)
-    if (this.joinInterval) clearInterval(this.joinInterval);
-    const sendJoin = () => {
-      if (this.role !== 'client') {
-        clearInterval(this.joinInterval);
-        return;
-      }
-      // If we are already in the list with more than just ourselves, or the host recognized us
-      if (this.playersInRoom.length > 0 && this.playersInRoom.some(p => p.id === this.playerId && this.playersInRoom.length > 1)) {
-        console.log('[Network] Join confirmed by host list');
-        clearInterval(this.joinInterval);
-        return;
-      }
-
-      this.sendToChannel('JOIN_REQUEST', {
-        roomId: this.roomId,
-        player: {
-          id: this.playerId,
-          name: clientName,
-          character: clientChar
-        }
+        conn.on('close', () => {
+          console.log('[Network] Host connection closed.');
+          this.disconnect();
+        });
       });
-    };
 
-    sendJoin();
-    this.joinInterval = setInterval(sendJoin, 1000);
-  }
-
-  private handleJoinRequest(player: any) {
-    if (this.role !== 'host') return;
-    
-    const existing = this.playersInRoom.find(p => p.id === player.id);
-    if (!existing) {
-      console.log('[Network] New player discovered:', player.name);
-      this.playersInRoom = [...this.playersInRoom, player];
-      if (this.onLobbyUpdate) this.onLobbyUpdate(this.playersInRoom);
-    }
-    
-    // Always broadcast lobby update when a join request comes in
-    // to ensure the joining client gets the full list immediately.
-    this.sendToChannel('LOBBY_UPDATE', this.playersInRoom);
-    console.log('[Network] Sent LOBBY_UPDATE for room:', this.roomId);
+      this.peer.on('error', (err) => {
+        console.error('[Network] PeerJS joining Error:', err);
+        reject(err);
+      });
+    });
   }
 
   startGame() {
     if (this.role === 'host') {
-      this.sendToChannel('GAME_START', null);
+      this.gameStarted = true;
+      if (this.expirationTimer) clearTimeout(this.expirationTimer);
+      this.broadcastToClients({ type: 'GAME_START' });
       if (this.onGameStart) this.onGameStart();
     }
   }
 
   broadcastState(state: GameState) {
     if (this.role !== 'host') return;
-    this.sendToChannel('GAME_STATE', state);
+    this.broadcastToClients({ type: 'GAME_STATE', state });
   }
 
   sendInput(input: RemoteInput) {
-    if (this.role !== 'client' || !this.playerId) return;
-    this.sendToChannel('PLAYER_INPUT', { id: this.playerId, input });
+    if (this.role !== 'client' || !this.playerId || !this.hostConnection) return;
+    
+    // We send input unreliably if possible for lower latency, but PeerJS defaults to reliable data channels mostly.
+    this.hostConnection.send({ type: 'PLAYER_INPUT', id: this.playerId, input });
   }
 
-  private sendToChannel(type: string, data: any) {
-    if (this.channel) {
-      this.channel.postMessage({ type, data, roomId: this.roomId });
+  private broadcastToClients(data: any) {
+    if (this.role === 'host') {
+      this.connections.forEach(conn => {
+        if (conn.open) {
+           conn.send(data);
+        }
+      });
     }
   }
 
   disconnect() {
-    if (this.lobbyInterval) clearInterval(this.lobbyInterval);
-    if (this.joinInterval) clearInterval(this.joinInterval);
+    if (this.expirationTimer) clearTimeout(this.expirationTimer);
     if (this.role === 'host') {
-      this.sendToChannel('ROOM_CLOSED', null);
+      this.broadcastToClients({ type: 'ROOM_CLOSED' });
     }
+    
+    if (this.hostConnection) {
+      this.hostConnection.close();
+      this.hostConnection = null;
+    }
+    
+    this.connections.forEach(conn => conn.close());
+    this.connections.clear();
+
+    if (this.peer) {
+      this.peer.destroy();
+      this.peer = null;
+    }
+
     this.role = 'offline';
     this.roomId = null;
+    this.playerId = null;
     this.playersInRoom = [];
-    if (this.channel) {
-      this.channel.close();
-      this.channel = null;
-    }
+    this.gameStarted = false;
   }
 }
 
