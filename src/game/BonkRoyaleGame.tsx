@@ -13,17 +13,24 @@ import {
 } from './audio';
 import PartyLobby from './PartyLobby';
 import { networkManager } from './NetworkManager';
+import LevelSelect from './LevelSelect';
+import { loadProgress, saveLevelCompletion } from './progressStore';
+import { LEVELS } from './levels';
 
 const BonkRoyaleGame = () => {
   const [selectedChar, setSelectedChar] = useState<CharacterDef | null>(null);
+  const [selectedLevel, setSelectedLevel] = useState<number | null>(null);
   const [isMultiplayer, setIsMultiplayer] = useState(false);
   const [inLobby, setInLobby] = useState(false);
   const [prefilledRoom, setPrefilledRoom] = useState<string | null>(null);
-  const [gamePhase, setGamePhase] = useState<'menu' | 'playing' | 'gameOver'>('menu');
+  const [gamePhase, setGamePhase] = useState<'menu' | 'levelSelect' | 'playing' | 'paused' | 'victory' | 'gameOver'>('menu');
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [scoreSaved, setScoreSaved] = useState(false);
   const [showBoostBlast, setShowBoostBlast] = useState(false);
+  const [starsEarned, setStarsEarned] = useState(0);
+  const [showLevelStart, setShowLevelStart] = useState(false);
+  const showLevelStartRef = useRef(false);
   const prevCooldownRef = useRef(0);
 
 
@@ -41,6 +48,19 @@ const BonkRoyaleGame = () => {
     }, 100);
     return () => clearInterval(timer);
   }, []);
+
+  // Level Start Banner Trigger
+  useEffect(() => {
+    if (selectedLevel) {
+      setShowLevelStart(true);
+      showLevelStartRef.current = true;
+      const timer = setTimeout(() => {
+        setShowLevelStart(false);
+        showLevelStartRef.current = false;
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [selectedLevel]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<GameState | null>(null);
   const inputRef = useRef({
@@ -121,9 +141,10 @@ const BonkRoyaleGame = () => {
   }, [selectedChar, scoreSaved]);
 
   useEffect(() => {
-    // Only start game if a character is selected AND we aren't in the lobby
-    if (!selectedChar || inLobby) return;
-
+    // Only start game if a character is selected AND we aren't in the lobby AND (we selected a level or we are in multiplayer)
+    if (!selectedChar || inLobby || (!isMultiplayer && selectedLevel === null)) return;
+    if (!canvasRef.current) return;
+    
     const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     setShowMobileControls(isTouch);
 
@@ -133,12 +154,27 @@ const BonkRoyaleGame = () => {
     canvas.width = w;
     canvas.height = h;
 
-    stateRef.current = createInitialState(w, h, selectedChar, isMultiplayer);
+    const lvlConfig = selectedLevel ? LEVELS.find(l => l.number === selectedLevel) : null;
+    const maxTime = lvlConfig ? lvlConfig.timeLimit : 0;
+
+    const handleVictory = (finalTimes: number) => {
+      if (!selectedLevel || !lvlConfig) return;
+      
+      let stars = 1;
+      if (finalTimes <= lvlConfig.starRequirements.three) stars = 3;
+      else if (finalTimes <= lvlConfig.starRequirements.two) stars = 2;
+      
+      setStarsEarned(stars);
+      saveLevelCompletion(selectedLevel, stars, finalTimes * 1000);
+    };
+
+    stateRef.current = createInitialState(w, h, selectedChar, isMultiplayer, 1, selectedLevel || 0, maxTime);
     if (networkManager.role === 'host') {
       stateRef.current.phase = 'playing'; // Network games start immediately upon entering the arena
+    } else if (!isMultiplayer) {
+      stateRef.current.phase = 'playing'; // Arcade levels start immediately
     }
     setGamePhase(stateRef.current.phase);
-    
     setScoreSaved(false);
     startBackgroundMusic();
 
@@ -150,6 +186,17 @@ const BonkRoyaleGame = () => {
       if (e.key === 'ArrowRight' || e.key === 'd') inp.right = true;
       if (e.key === ' ') { inp.bonk = true; e.preventDefault(); }
       if (e.key === 'Shift') { inp.boost = true; e.preventDefault(); }
+      if (e.key === 'Escape') {
+        if (stateRef.current) {
+          if (stateRef.current.phase === 'playing') {
+            stateRef.current.phase = 'paused';
+            setGamePhase('paused');
+          } else if (stateRef.current.phase === 'paused') {
+            stateRef.current.phase = 'playing';
+            setGamePhase('playing');
+          }
+        }
+      }
     };
     const onKeyUp = (e: KeyboardEvent) => {
       const inp = inputRef.current;
@@ -195,7 +242,10 @@ const BonkRoyaleGame = () => {
            }
         } else {
           // If Host or Local: run full simulation
-          stateRef.current = updateGame(stateRef.current, inputRef.current, dt);
+          // Guard simulation: Don't update game while Level Start banner is visible
+          if (!showLevelStartRef.current) {
+            stateRef.current = updateGame(stateRef.current, inputRef.current, dt);
+          }
 
           // If Host: Broadcast state to clients
           if (networkManager.role === 'host') {
@@ -211,6 +261,10 @@ const BonkRoyaleGame = () => {
           // Auto-save score on game over transition
           if (stateRef.current.phase === 'gameOver' && prevPhase !== 'gameOver') {
             saveScore();
+          }
+
+          if (stateRef.current.phase === 'victory' && prevPhase !== 'victory') {
+            handleVictory(stateRef.current.time);
           }
           
           if (stateRef.current.phase !== prevPhase) {
@@ -242,7 +296,7 @@ const BonkRoyaleGame = () => {
       stopBackgroundMusic();
       networkManager.disconnect();
     };
-  }, [selectedChar, inLobby, getCanvasSize, handleSoundEvents, saveScore]);
+  }, [selectedChar, selectedLevel, inLobby, getCanvasSize, handleSoundEvents, saveScore, isMultiplayer, gamePhase]);
 
   const handleJoystickStart = (e: React.TouchEvent) => {
     e.preventDefault();
@@ -336,16 +390,75 @@ const BonkRoyaleGame = () => {
     );
   }
 
+  if (gamePhase === 'levelSelect' && selectedChar) {
+    return (
+      <LevelSelect 
+        onSelectLevel={(lvl) => {
+          setSelectedLevel(lvl);
+          setGamePhase('playing');
+        }}
+        onBack={() => {
+          setGamePhase('menu');
+          if (stateRef.current) stateRef.current.phase = 'menu';
+        }}
+      />
+    );
+  }
+
   return (
-    <div 
-      className="fixed inset-0 w-full h-full bg-background relative select-none overflow-hidden flex items-center justify-center"
-      style={{ touchAction: 'none' }}
-    >
+<div
+  className="fixed inset-0 bg-background select-none overflow-hidden flex items-center justify-center z-0"
+  style={{ touchAction: "none" }}
+>
       <canvas
         ref={canvasRef}
-        className="rounded-2xl border-2 border-border shadow-2xl max-w-full"
+        className="rounded-2xl border-2 border-white/10 shadow-2xl max-w-full max-h-[90vh] object-contain"
         style={{ touchAction: 'none' }}
       />
+
+      {/* Level Start Splash Banner */}
+      <AnimatePresence>
+        {showLevelStart && selectedLevel && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-[70] flex items-center justify-center pointer-events-none select-none"
+          >
+            <motion.div
+              initial={{ scale: 0.8, y: 50, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              exit={{ scale: 1.2, y: -50, opacity: 0 }}
+              transition={{ type: "spring", damping: 15 }}
+              className="relative px-12 py-8 rounded-[3rem] bg-black/20 backdrop-blur-3xl border border-white/20 shadow-[0_50px_100px_rgba(0,0,0,0.8)] overflow-hidden"
+            >
+              {/* Animated Accents */}
+              <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/10" />
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-primary to-transparent opacity-50" />
+              <div className="absolute bottom-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-secondary to-transparent opacity-50" />
+
+              <div className="relative text-center">
+                <p className="text-white/40 text-[10px] font-black uppercase tracking-[0.5em] mb-3">Entering Arena</p>
+                <h2 className="text-6xl sm:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white via-white to-white/40 mb-1 font-display tracking-tight uppercase">
+                  Stage {selectedLevel}
+                </h2>
+                <div className="flex items-center justify-center gap-3">
+                  <div className="h-px w-8 bg-white/20" />
+                  <p className="text-primary font-black text-xs uppercase tracking-widest">
+                    {selectedLevel % 5 === 0 ? "🔥 BOSS BATTLE 🔥" : 
+                     selectedLevel <= 5 ? "Tutorial Zone" :
+                     selectedLevel <= 10 ? "Power Surge" :
+                     selectedLevel <= 15 ? "The Traps" :
+                     selectedLevel <= 20 ? "Motion Sickness" : "Grand Finale"}
+                  </p>
+                  <div className="h-px w-8 bg-white/20" />
+                </div>
+                <p className="mt-6 text-white/60 text-[9px] font-bold uppercase tracking-[0.2em] animate-pulse">Eliminate All Enemies</p>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       
       {/* Top Navigation Bar - Premium "Pro-Gaming" Logic */}
       <div className="absolute top-4 left-4 right-4 h-12 bg-black/40 backdrop-blur-xl border border-white/10 flex items-center justify-between px-3 rounded-2xl z-50 shadow-[0_10px_30px_rgba(0,0,0,0.5)] landscape:hidden md:landscape:flex">
@@ -377,6 +490,13 @@ const BonkRoyaleGame = () => {
            </button>
         </div>
       </div>
+
+      {/* Persistent Level Indicator */}
+      {selectedLevel && gamePhase !== 'menu' && (
+        <div className="absolute top-[4.5rem] left-1/2 -translate-x-1/2 z-40 bg-black/20 backdrop-blur-md px-4 py-1 rounded-full border border-white/5 pointer-events-none">
+          <p className="text-[10px] font-black text-white/40 tracking-[0.3em] uppercase">Stage {selectedLevel}</p>
+        </div>
+      )}
 
       {showMobileControls && gamePhase !== 'menu' && (
         <div 
@@ -553,79 +673,137 @@ const BonkRoyaleGame = () => {
 
       {/* 1. Instruction Overlay (Menu Phase) */}
       {gamePhase === 'menu' && (
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-md z-40 flex flex-col items-center justify-center p-6 text-center">
-          <div className="max-w-xs w-full bg-white/10 border border-white/20 rounded-3xl p-8 shadow-[0_20px_50px_rgba(0,0,0,0.5)] animate-in fade-in zoom-in duration-300">
-            <h1 className="text-4xl font-black text-yellow-400 mb-2 tracking-tighter" style={{ fontFamily: 'var(--font-display)' }}>
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-xl z-[60] flex flex-col items-center justify-center p-4 sm:p-6 text-center overflow-y-auto">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="max-w-md w-full bg-white/5 border border-white/20 backdrop-blur-2xl rounded-[2.5rem] p-6 sm:p-10 shadow-[0_40px_100px_rgba(0,0,0,0.7),inset_0_1px_1px_rgba(255,255,255,0.1)] relative overflow-hidden my-auto"
+          >
+            {/* Animated Background Glow */}
+            <div className="absolute -top-24 -left-24 w-48 h-48 bg-primary/20 blur-[80px] rounded-full pointer-events-none" />
+            <div className="absolute -bottom-24 -right-24 w-48 h-48 bg-secondary/20 blur-[80px] rounded-full pointer-events-none" />
+
+            <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-yellow-200 via-yellow-400 to-orange-600 mb-2 tracking-tighter uppercase font-display" style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.3))' }}>
               BONK ROYALE
             </h1>
-            <p className="text-white/60 text-sm mb-8 font-medium">Multiplayer Arena Battle</p>
+            <p className="text-white/50 text-xs mb-6 sm:mb-10 font-bold tracking-[0.3em] uppercase">Multiplayer Arena Battle</p>
             
-            <div className="space-y-4 mb-10">
-              <div className="flex items-center gap-3 bg-white/5 p-3 rounded-2xl border border-white/5">
-                <div className="w-10 h-10 bg-cyan-500/20 rounded-xl flex items-center justify-center text-xl">🕹️</div>
+            <div className="grid grid-cols-1 gap-3 sm:gap-4 mb-8 sm:mb-12">
+              <div className="flex items-center gap-4 bg-white/5 p-4 rounded-3xl border border-white/10 group hover:bg-white/10 transition-colors">
+                <div className="w-14 h-14 bg-gradient-to-br from-cyan-400 to-blue-600 rounded-2xl flex items-center justify-center text-2xl shadow-lg group-hover:scale-110 transition-transform">🕹️</div>
                 <div className="text-left leading-tight">
-                  <p className="text-white font-bold text-xs uppercase tracking-widest">Movement</p>
-                  <p className="text-white/40 text-[10px]">Use the virtual joystick</p>
+                  <p className="text-white font-black text-xs uppercase tracking-widest mb-1">Movement</p>
+                  <p className="text-white/40 text-[11px] font-medium uppercase tracking-tighter">Use keys or the virtual joystick</p>
                 </div>
               </div>
-              <div className="flex items-center gap-3 bg-white/5 p-3 rounded-2xl border border-white/5">
-                <div className="w-10 h-10 bg-orange-500/20 rounded-xl flex items-center justify-center text-xl">💥</div>
+              <div className="flex items-center gap-4 bg-white/5 p-4 rounded-3xl border border-white/10 group hover:bg-white/10 transition-colors">
+                <div className="w-14 h-14 bg-gradient-to-br from-orange-400 to-red-600 rounded-2xl flex items-center justify-center text-2xl shadow-lg group-hover:scale-110 transition-transform">💥</div>
                 <div className="text-left leading-tight">
-                  <p className="text-white font-bold text-xs uppercase tracking-widest">Bonk</p>
-                  <p className="text-white/40 text-[10px]">Push enemies off the edge</p>
+                  <p className="text-white font-black text-xs uppercase tracking-widest mb-1">The Bonk</p>
+                  <p className="text-white/40 text-[11px] font-medium uppercase tracking-tighter">Hammer enemies off the arena edge</p>
                 </div>
               </div>
             </div>
 
             <button 
-              onClick={() => { if (stateRef.current) stateRef.current.phase = 'playing'; }}
-              className="w-full h-14 bg-gradient-to-r from-yellow-400 to-orange-600 rounded-2xl text-white font-black text-lg shadow-xl shadow-orange-500/20 active:scale-95 transition-all group relative overflow-hidden"
+              onClick={() => { 
+                const newPhase = isMultiplayer ? 'playing' : 'levelSelect';
+                if (stateRef.current) {
+                  stateRef.current.phase = newPhase;
+                }
+                setGamePhase(newPhase);
+              }}
+              className="w-full h-16 bg-gradient-to-r from-yellow-400 via-orange-500 to-red-600 rounded-3xl text-white font-black text-xl shadow-[0_15px_30px_rgba(249,115,22,0.3)] active:scale-90 transition-all group relative overflow-hidden ring-4 ring-orange-500/20"
             >
-              <div className="absolute inset-0 bg-white/20 -translate-x-full group-hover:translate-x-full transition-transform duration-700" />
-              START BATTLE
+              <div className="absolute inset-0 bg-white/30 -translate-x-full group-hover:translate-x-full transition-transform duration-700" />
+              <span className="relative z-10 flex items-center justify-center gap-2">
+                START BATTLE <span className="text-2xl">→</span>
+              </span>
             </button>
-          </div>
+          </motion.div>
         </div>
       )}
 
-      {/* 2. Game Over Overlay (GameOver Phase) */}
+      {/* 2. PAUSE OVERLAY */}
+      {gamePhase === 'paused' && (
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-xl z-[60] flex flex-col items-center justify-center p-6 text-center">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="max-w-sm w-full bg-white/5 border border-white/10 backdrop-blur-2xl rounded-[2.5rem] p-10 shadow-2xl"
+          >
+            <h1 className="text-4xl font-black text-white mb-8 tracking-tighter uppercase font-display">
+              Paused
+            </h1>
+            <div className="space-y-4">
+              <button 
+                onClick={() => { if (stateRef.current) stateRef.current.phase = 'playing'; }}
+                className="w-full h-16 bg-gradient-to-r from-cyan-400 to-blue-600 rounded-3xl text-white font-black text-xl shadow-lg active:scale-95 transition-all outline-none"
+              >
+                RESUME
+              </button>
+              <button 
+                onClick={() => { 
+                  if (stateRef.current) {
+                    stateRef.current.phase = isMultiplayer ? 'menu' : 'levelSelect';
+                    setGamePhase(stateRef.current.phase);
+                  }
+                }}
+                className="w-full h-14 bg-white/5 border border-white/10 rounded-2xl text-white/70 font-bold active:scale-95 transition-all outline-none"
+              >
+                QUIT TO MENU
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* 3. Game Over Overlay (GameOver Phase) */}
       {gamePhase === 'gameOver' && (
-        <div className="absolute inset-0 bg-black/80 backdrop-blur-xl z-50 flex flex-col items-center justify-center p-6 text-center">
+        <div className="absolute inset-0 bg-black/90 backdrop-blur-xl z-[60] flex flex-col items-center justify-center p-6 text-center">
           {(() => {
             const player = stateRef.current?.players.find(p => p.isPlayer);
             const won = player?.alive;
             return (
-              <div className="max-w-xs w-full animate-in slide-in-from-bottom-8 duration-500">
-                <div className={`text-6xl mb-4 ${won ? 'animate-bounce' : 'grayscale'}`}>{won ? '🏆' : '💀'}</div>
-                <h2 className={`text-5xl font-black mb-2 tracking-tighter ${won ? 'text-yellow-400' : 'text-red-500'}`} style={{ fontFamily: 'var(--font-display)' }}>
-                  {won ? 'VICTORY!' : 'BONKED!'}
+              <motion.div 
+                initial={{ opacity: 0, y: 40 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="max-w-sm w-full"
+              >
+                <div className={`text-7xl mb-6 ${won ? 'animate-bounce' : 'grayscale'}`}>{won ? '🏆' : '💀'}</div>
+                <h2 className={`text-6xl font-black mb-6 tracking-tighter uppercase font-display ${won ? 'text-yellow-400' : 'text-red-500'}`}>
+                  {won ? 'Victory!' : 'Bonked!'}
                 </h2>
-                <div className="bg-white/5 border border-white/10 rounded-3xl p-6 mb-8 shadow-2xl">
-                  <p className="text-white/40 text-xs uppercase tracking-[0.2em] mb-1">Final Score</p>
-                  <p className="text-white text-4xl font-black mb-4">{stateRef.current?.playerScore || 0}</p>
+                <div className="bg-white/5 border border-white/10 backdrop-blur-3xl rounded-[2.5rem] p-8 mb-8 shadow-2xl relative overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent pointer-events-none" />
+                  <p className="text-white/40 text-[10px] font-black uppercase tracking-[0.4em] mb-2">Final Score</p>
+                  <p className="text-white text-5xl font-black mb-6 tracking-tighter">{stateRef.current?.playerScore || 0}</p>
                   
-                  <div className="flex justify-between items-center text-[10px] font-bold mb-4">
-                    <span className="text-white/40 uppercase tracking-widest">Level Progress</span>
-                    <span className="text-yellow-400">Level {stateRef.current?.round || 1}</span>
+                  <div className="flex justify-between items-center text-[11px] font-black mb-6">
+                    <span className="text-white/30 uppercase tracking-[0.2em]">Level Progress</span>
+                    <span className="text-yellow-400">STAGE {stateRef.current?.round || 1}</span>
                   </div>
                   
                   {/* Minified Leaderboard inside Game Over */}
-                  <div className="space-y-1 mt-4 border-t border-white/10 pt-4">
+                  <div className="space-y-2 mt-2 border-t border-white/10 pt-6">
                     {leaderboard.slice(0, 3).map((entry, i) => (
-                      <div key={i} className="flex justify-between items-center text-[10px] font-bold">
-                        <span className="text-white/40">{i+1}. {entry.name}</span>
-                        <span className="text-yellow-400/80">{entry.score}</span>
+                      <div key={i} className="flex justify-between items-center text-[11px] font-bold">
+                        <span className="text-white/40 uppercase tracking-tighter">{i+1}. {entry.name}</span>
+                        <span className="text-yellow-400/80 font-mono">{entry.score}</span>
                       </div>
                     ))}
                   </div>
                 </div>
 
-                <div className="flex gap-3">
+                <div className="flex gap-4">
                   <button 
-                    onClick={() => { window.location.href = '/'; }}
-                    className="flex-1 h-14 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-white font-bold active:scale-95 transition-all"
+                    onClick={() => { 
+                      setGamePhase(isMultiplayer ? 'menu' : 'levelSelect');
+                      if (stateRef.current) stateRef.current.phase = isMultiplayer ? 'menu' : 'levelSelect';
+                    }}
+                    className="flex-1 h-16 bg-white/5 hover:bg-white/10 border border-white/10 rounded-3xl text-white/50 font-black text-sm uppercase tracking-widest active:scale-95 transition-all outline-none"
                   >
-                    HOME
+                    Quit
                   </button>
                   <button 
                     onClick={() => { 
@@ -633,18 +811,80 @@ const BonkRoyaleGame = () => {
                       const { w, h } = getCanvasSize();
                       stateRef.current = resetGame(stateRef.current!, w, h, selectedChar!, isMultiplayer);
                     }}
-                    className={`flex-[2] h-14 ${won ? 'bg-gradient-to-r from-yellow-400 to-orange-600 shadow-orange-500/20' : 'bg-gradient-to-r from-cyan-400 to-blue-600 shadow-blue-500/20'} rounded-2xl text-white font-black text-lg shadow-xl active:scale-95 transition-all`}
+                    className={`flex-[2] h-16 ${won ? 'bg-gradient-to-r from-yellow-400 to-orange-600' : 'bg-gradient-to-r from-cyan-400 to-blue-600'} rounded-3xl text-white font-black text-xl shadow-xl active:scale-95 transition-all outline-none`}
                   >
-                    {won ? 'NEXT LEVEL' : 'REPLAY'}
+                    {won ? 'PLAY AGAIN' : 'RETRY'}
                   </button>
                 </div>
-              </div>
+              </motion.div>
             );
           })()}
         </div>
       )}
 
-      {/* 3. Leaderboard overlay (Manual Toggle) */}
+      {/* 4. Victory Overlay (Victory Phase) */}
+      {gamePhase === 'victory' && (
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-xl z-[60] flex flex-col items-center justify-center p-6 text-center">
+          <div className="absolute inset-0 overflow-hidden pointer-events-none">
+            <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-yellow-400/10 rounded-full blur-[120px] animate-pulse" />
+            <div className="absolute bottom-1/4 right-1/4 w-64 h-64 bg-orange-500/10 rounded-full blur-[120px] animate-pulse delay-1000" />
+          </div>
+
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="relative z-10 max-w-sm w-full bg-white/5 border border-yellow-500/30 backdrop-blur-3xl rounded-[3rem] p-10 shadow-[0_0_100px_rgba(234,179,8,0.1)]"
+          >
+            <h1 className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-b from-yellow-100 to-yellow-600 mb-2 drop-shadow-sm font-display uppercase tracking-tighter">
+              Cleared!
+            </h1>
+            <p className="text-yellow-500/50 text-[10px] font-black uppercase tracking-[0.5em] mb-10">Stage Complete</p>
+            
+            <div className="flex justify-center gap-6 my-10">
+              {[1, 2, 3].map((star) => {
+                 const achieved = star <= starsEarned; 
+                 return (
+                  <motion.div 
+                    key={star} 
+                    initial={{ scale: 0 }}
+                    animate={{ scale: achieved ? 1 : 0.8 }}
+                    transition={{ delay: 0.2 * star, type: "spring" }}
+                    className={`text-6xl transform ${achieved ? 'text-yellow-400 drop-shadow-[0_0_20px_rgba(250,204,21,0.8)]' : 'text-white/5 grayscale'}`}
+                  >
+                    ★
+                  </motion.div>
+                 )
+              })}
+            </div>
+
+            <div className="flex flex-col gap-4 mt-12">
+              <button 
+                onClick={() => { 
+                  if (selectedLevel && selectedLevel < 30) {
+                    setSelectedLevel(selectedLevel + 1);
+                  } else {
+                    setGamePhase('levelSelect');
+                  }
+                }}
+                className="w-full h-16 bg-gradient-to-r from-yellow-400 via-orange-500 to-yellow-600 rounded-3xl text-black font-black text-xl shadow-[0_10px_40px_rgba(250,204,21,0.3)] active:scale-95 transition-all outline-none"
+              >
+                {selectedLevel && selectedLevel < 30 ? 'NEXT LEVEL' : 'ALL CLEAR!'}
+              </button>
+              <button 
+                onClick={() => { 
+                  setGamePhase('levelSelect');
+                  if (stateRef.current) stateRef.current.phase = 'levelSelect';
+                }}
+                className="w-full h-14 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-white/50 font-black text-sm uppercase tracking-widest active:scale-95 transition-all outline-none"
+              >
+                STAGES
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* 4. Leaderboard overlay (Manual Toggle) */}
       {showLeaderboard && (
         <div className="absolute inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[60]" onClick={() => setShowLeaderboard(false)}>
           <div

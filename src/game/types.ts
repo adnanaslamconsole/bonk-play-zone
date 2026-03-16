@@ -51,16 +51,21 @@ export interface Particle {
 export interface Hazard {
   x: number;
   y: number;
-  type: 'ice' | 'trampoline';
+  type: 'ice' | 'trampoline' | 'trap' | 'moving';
   radius: number;
   alive: boolean;
-  cooldown: number; // For trampolines to not keep bouncing instantly
+  cooldown: number; // For trampolines/traps
+  vx?: number; // For moving
+  vy?: number; // For moving
+  anchorX?: number;
+  anchorY?: number;
 }
 
 export type SoundEvent = 'bonk' | 'elimination' | 'powerup' | 'victory' | 'defeat';
 
 export interface GameState {
-  phase: 'menu' | 'playing' | 'gameOver';
+  phase: 'menu' | 'levelSelect' | 'playing' | 'paused' | 'victory' | 'gameOver';
+  level: number; // Current Level (1-30), 0 if multiplayer/endless
   players: Player[];
   powerUps: PowerUp[];
   particles: Particle[];
@@ -69,6 +74,7 @@ export interface GameState {
   arenaMaxRadius: number;
   arenaCenter: Vec2;
   time: number;
+  maxTime: number; // from level config
   round: number;
   playerScore: number;
   shrinkTimer: number;

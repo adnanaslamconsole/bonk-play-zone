@@ -2,6 +2,7 @@ import { GameState, Player, PowerUp, Particle, Hazard } from "./types";
 import { CharacterDef, CHARACTERS } from "./characters";
 import { getThemeForRound } from "./arenaThemes";
 import { networkManager } from "./NetworkManager";
+import { LEVELS } from "./levels";
 
 const BOT_COLORS = [
   "#ff6b9d",
@@ -20,6 +21,8 @@ export function createInitialState(
   playerChar?: CharacterDef,
   isMultiplayer = false,
   round = 1,
+  level = 0,
+  maxTime = 0,
 ): GameState {
   const isMobile = canvasW < 768;
   const arenaR = isMobile
@@ -33,9 +36,10 @@ export function createInitialState(
 
   const players: Player[] = [];
   const char = playerChar || CHARACTERS[0];
+  const levelDef = level > 0 ? LEVELS.find(l => l.number === level) : null;
 
   // Dynamic Bot Scaling: Level 1 (4 players), Level 2 (7), etc. Max 20.
-  const totalSlots = Math.min(20, 1 + (round * 3));
+  const totalSlots = levelDef ? levelDef.totalEnemies + 1 : Math.min(20, 1 + (round * 3));
 
   // Multi-Ring Radial Distribution Algorithm
   const getSpawnPoint = (idx: number, total: number, r: number) => {
@@ -126,8 +130,38 @@ export function createInitialState(
     }
   }
 
+  const hazards: Hazard[] = [];
+  if (levelDef) {
+    // Generate hazards based on level config
+    const spawnHazard = (type: Hazard["type"], ringRadius: number) => {
+      const angle = Math.random() * Math.PI * 2;
+      hazards.push({
+        x: cx + Math.cos(angle) * ringRadius,
+        y: cy + Math.sin(angle) * ringRadius,
+        type,
+        radius: type === 'moving' || type === 'trap' ? 25 : 20,
+        alive: true,
+        cooldown: 0,
+        vx: type === 'moving' ? (Math.random() > 0.5 ? 2 : -2) : 0,
+        vy: type === 'moving' ? (Math.random() > 0.5 ? 2 : -2) : 0,
+        anchorX: cx + Math.cos(angle) * ringRadius,
+        anchorY: cy + Math.sin(angle) * ringRadius,
+      });
+    };
+
+    if (levelDef.hazardType === 'traps') {
+      for (let i = 0; i < levelDef.hazardCount; i++) spawnHazard('trap', arenaR * 0.5);
+    } else if (levelDef.hazardType === 'moving') {
+      for (let i = 0; i < levelDef.hazardCount; i++) spawnHazard('moving', arenaR * 0.7);
+    } else if (levelDef.hazardType === 'mixed') {
+      for (let i = 0; i < Math.ceil(levelDef.hazardCount / 2); i++) spawnHazard('moving', arenaR * 0.7);
+      for (let i = 0; i < Math.floor(levelDef.hazardCount / 2); i++) spawnHazard('trap', arenaR * 0.4);
+    }
+  }
+
   return {
     phase: "menu",
+    level,
     players,
     powerUps: [],
     particles: [],
@@ -136,6 +170,7 @@ export function createInitialState(
     arenaMaxRadius: arenaR,
     arenaCenter: { x: cx, y: cy },
     time: 0,
+    maxTime,
     round,
     playerScore: 0,
     shrinkTimer: 0,
@@ -189,7 +224,7 @@ export function resetGame(
 ): GameState {
   const won = state.players.find(p => p.isPlayer)?.alive;
   const nextRound = won ? state.round + 1 : state.round;
-  const fresh = createInitialState(canvasW, canvasH, playerChar, isMultiplayer, nextRound);
+  const fresh = createInitialState(canvasW, canvasH, playerChar, isMultiplayer, nextRound, state.level, state.maxTime);
   fresh.phase = "playing";
   fresh.playerScore = state.playerScore;
   fresh.theme = getThemeForRound(nextRound);
@@ -245,6 +280,28 @@ export function updateGame(
   if (s.messageTimer > 0) {
     s.messageTimer -= dt;
     if (s.messageTimer <= 0) s.message = "";
+  }
+
+  // Update Hazards (Autonomous Movement) - Done once per frame
+  for (const h of s.hazards) {
+    if (!h.alive) continue;
+    
+    if (h.cooldown > 0) {
+      h.cooldown -= dt;
+    }
+
+    if (h.type === 'moving' && h.anchorX !== undefined && h.anchorY !== undefined) {
+      // 60fps equivalent speed (2-4 pixels per frame)
+      h.x += (h.vx || 0) * 60 * dt;
+      h.y += (h.vy || 0) * 60 * dt;
+      
+      const dxFromAnchor = h.x - h.anchorX;
+      const dyFromAnchor = h.y - h.anchorY;
+      if (Math.sqrt(dxFromAnchor * dxFromAnchor + dyFromAnchor * dyFromAnchor) > 80) {
+         h.vx = -1 * (h.vx || 0);
+         h.vy = -1 * (h.vy || 0);
+      }
+    }
   }
 
   // Update players
@@ -353,10 +410,6 @@ export function updateGame(
     for (const h of s.hazards) {
       if (!h.alive) continue;
 
-      if (h.cooldown > 0) {
-        h.cooldown -= dt;
-      }
-
       const hdx = p.x - h.x;
       const hdy = p.y - h.y;
       const hDist = Math.sqrt(hdx * hdx + hdy * hdy);
@@ -385,6 +438,29 @@ export function updateGame(
           for (let i = 0; i < 10; i++) {
             s.particles.push(createParticle(h.x, h.y, "#76ff03"));
           }
+        } else if (h.type === "trap" && h.cooldown <= 0) {
+          // Trap hits player
+          const angle = Math.atan2(hdy, hdx);
+          const trapForce = 800;
+          p.vx = Math.cos(angle) * trapForce;
+          p.vy = Math.sin(angle) * trapForce;
+          p.stunTimer = 0.6;
+          h.cooldown = 2.0; // Trap retracts for 2 seconds
+          s.soundEvents.push("bonk");
+          for (let i = 0; i < 5; i++) {
+             s.particles.push(createParticle(p.x, p.y, "#ff1744"));
+          }
+        } else if (h.type === "moving") {
+          // Acts as a solid bumper, impart velocity
+          const angle = Math.atan2(hdy, hdx);
+          const bumperForce = 400;
+          p.vx = Math.cos(angle) * bumperForce + (h.vx || 0) * 100;
+          p.vy = Math.sin(angle) * bumperForce + (h.vy || 0) * 100;
+          
+          // Separate player immediately to prevent getting stuck
+          const overlap = p.radius + h.radius - hDist;
+          p.x += Math.cos(angle) * overlap;
+          p.y += Math.sin(angle) * overlap;
         }
       }
     }
@@ -500,13 +576,25 @@ export function updateGame(
 
   if (!player?.alive) {
     s.phase = "gameOver";
-    s.message = `Game Over! Score: ${s.playerScore}`;
+    s.message = s.level > 0 ? "You Died! Try Again!" : `Game Over! Score: ${s.playerScore}`;
     s.soundEvents.push("defeat");
   } else if (aliveCount <= 1) {
     s.playerScore += 500;
+    
+    if (s.level > 0) {
+      s.phase = "victory";
+      // We'll calculate stars based on time in BonkRoyaleGame or let UI handle it based on maxTime vs s.time
+      s.message = "Level Cleared!";
+      s.soundEvents.push("victory");
+    } else {
+      s.phase = "gameOver";
+      s.message = `🏆 You Won! Score: ${s.playerScore}`;
+      s.soundEvents.push("victory");
+    }
+  } else if (s.level > 0 && s.maxTime > 0 && s.time >= s.maxTime) {
     s.phase = "gameOver";
-    s.message = `🏆 You Won! Score: ${s.playerScore}`;
-    s.soundEvents.push("victory");
+    s.message = "Time's Up!";
+    s.soundEvents.push("defeat");
   }
 
   return s;
@@ -1153,6 +1241,43 @@ function renderHazard(
     ctx.beginPath();
     ctx.arc(0, 0, haz.radius * 0.2, 0, Math.PI * 2);
     ctx.fill();
+  } else if (haz.type === "trap") {
+    // Spiked Trap
+    ctx.fillStyle = "#333333";
+    ctx.beginPath();
+    ctx.arc(0, 0, haz.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#ff1744"; // Red Rim
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Spikes (pop out if cooldown > 0 indicates active/triggered state in update logic)
+    if (haz.cooldown > 0 || Math.sin(time * 3) > 0) { // animate for now if no rigid cooldown logic
+       ctx.fillStyle = "#e0e0e0";
+       for(let i=0; i<8; i++) {
+          const a = (i / 8) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(a)*haz.radius*0.3, Math.sin(a)*haz.radius*0.3);
+          ctx.lineTo(Math.cos(a)*haz.radius, Math.sin(a)*haz.radius);
+          ctx.lineTo(Math.cos(a+0.2)*haz.radius*0.3, Math.sin(a+0.2)*haz.radius*0.3);
+          ctx.fill();
+       }
+    }
+  } else if (haz.type === "moving") {
+    // Floating Platform / Bumper
+    ctx.fillStyle = "#4a148c"; // Deep purple
+    ctx.beginPath();
+    ctx.arc(0, 0, haz.radius, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Tech rings
+    ctx.strokeStyle = "#d500f9"; // Neon purple
+    ctx.lineWidth = 2;
+    for(let r= haz.radius*0.3; r<haz.radius; r+= haz.radius*0.3) {
+      ctx.beginPath();
+      ctx.arc(0, 0, r + Math.sin(time*2)*2, 0, Math.PI*2);
+      ctx.stroke();
+    }
   }
 
   ctx.restore();
