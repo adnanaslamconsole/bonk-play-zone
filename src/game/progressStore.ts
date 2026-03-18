@@ -65,7 +65,7 @@ export const saveLevelCompletion = (levelNumber: number, stars: number, timeMs: 
   };
   
   // Auto-unlock next level
-  if (levelNumber < 30) {
+  if (levelNumber < 100) {
     const nextLvl = levelNumber + 1;
     if (!progress.levels[nextLvl]) {
       progress.levels[nextLvl] = { unlocked: true, stars: 0, bestTime: 0 };

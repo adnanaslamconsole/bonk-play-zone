@@ -178,6 +178,7 @@ export function createInitialState(
     messageTimer: 0,
     soundEvents: [],
     theme: getThemeForRound(round),
+    countdownTimer: 3.0,
   };
 }
 
@@ -212,6 +213,10 @@ function createPlayer(
     superBonkTimer: 0,
     boosterTimer: 0,
     boosterCooldown: 0,
+    activeAbility: null,
+    abilityTimer: 0,
+    activePower: null,
+    powerTimer: 0,
   };
 }
 
@@ -225,7 +230,7 @@ export function resetGame(
   const won = state.players.find(p => p.isPlayer)?.alive;
   const nextRound = won ? state.round + 1 : state.round;
   const fresh = createInitialState(canvasW, canvasH, playerChar, isMultiplayer, nextRound, state.level, state.maxTime);
-  fresh.phase = "playing";
+  fresh.phase = "countdown";
   fresh.playerScore = state.playerScore;
   fresh.theme = getThemeForRound(nextRound);
   return fresh;
@@ -251,6 +256,16 @@ export function updateGame(
   input: InputState,
   dt: number,
 ): GameState {
+  if (state.phase === "countdown") {
+    const s = { ...state };
+    s.countdownTimer -= dt;
+    if (s.countdownTimer <= 0) {
+      s.phase = "playing";
+      s.soundEvents = []; // Needed to initialize
+      s.soundEvents.push("bonk"); // "GO!" sound
+    }
+    return s;
+  }
   if (state.phase !== "playing") return state;
 
   const s = { ...state };
@@ -315,6 +330,57 @@ export function updateGame(
     if (p.superBonkTimer > 0) p.superBonkTimer -= dt;
     if (p.boosterTimer > 0) p.boosterTimer -= dt;
     if (p.boosterCooldown > 0) p.boosterCooldown -= dt;
+
+    if (p.powerTimer > 0 && p.activePower) {
+      p.powerTimer -= dt;
+      if (p.powerTimer <= 0) {
+        if (p.activePower === "speed" || p.activePower === "shield") {
+          p.knockbackResist = 1;
+        }
+        if (p.activePower === "size") {
+          p.radius = 22;
+        }
+        p.activePower = null;
+      }
+    }
+
+    if (p.abilityTimer > 0) {
+      p.abilityTimer -= dt;
+      if (["dash", "butter", "ice", "spin", "bounce"].includes(p.activeAbility || "")) {
+         const isSpin = p.activeAbility === "spin";
+         const isDash = p.activeAbility === "dash";
+         const bonkForce = isDash ? 1000 : (isSpin ? 600 : 800);
+         const bonkRange = isSpin ? 60 : 40;
+         
+         for (const target of s.players) {
+            if (target.id === p.id || !target.alive) continue;
+            const dx = target.x - p.x;
+            const dy = target.y - p.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < p.radius + target.radius + bonkRange) {
+               const nx = dx / dist;
+               const ny = dy / dist;
+               target.vx += nx * (bonkForce / target.knockbackResist);
+               target.vy += ny * (bonkForce / target.knockbackResist);
+               target.stunTimer = isDash ? 0.8 : 0.4;
+            }
+         }
+         
+         if (p.activeAbility === "ice" && Math.random() < 0.1) {
+            s.hazards.push({
+               x: p.x, y: p.y, type: "ice", radius: 30, alive: true, cooldown: 0, life: 2, maxLife: 2
+            });
+         }
+         if (Math.random() < 0.4) {
+            const color = isDash ? "#00e5ff" : (p.activeAbility === "ice" ? "#80deea" : (p.activeAbility === "butter" ? "#ff9100" : "#b388ff"));
+            s.particles.push(createParticle(p.x, p.y, color, 1.5));
+         }
+      }
+      if (p.abilityTimer <= 0) {
+         p.activeAbility = null;
+         p.knockbackResist = 1; // Reset any ability-based resistance changes
+      }
+    }
 
     if (p.stunTimer > 0) {
       p.stunTimer -= dt;
@@ -555,6 +621,10 @@ export function updateGame(
   // Clean up dead power-ups and hazards
   s.powerUps = s.powerUps.filter((p) => p.alive);
   s.hazards = s.hazards.filter((h) => {
+    if (h.life !== undefined) {
+      h.life -= dt;
+      if (h.life <= 0) h.alive = false;
+    }
     // Hazards far outside the shrinking area disappear
     const dx = h.x - s.arenaCenter.x;
     const dy = h.y - s.arenaCenter.y;
@@ -602,114 +672,104 @@ export function updateGame(
 
 function performBonk(state: GameState, attacker: Player) {
   attacker.expression = "angry";
-  setTimeout(() => {
-    attacker.expression = "normal";
-  }, 300);
+  setTimeout(() => { attacker.expression = "normal"; }, 300);
 
   const isSuper = attacker.superBonkTimer > 0;
-
-  // Base properties
   let abilityType = "Ground Pound";
-
-  // Find character def to get their unique ability
   const characterDef = CHARACTERS.find((c) => c.name === attacker.name);
-  if (characterDef) {
-    abilityType = characterDef.ability;
-  }
+  if (characterDef) abilityType = characterDef.ability;
 
-  // --- Zappy: Lightning Dash ---
+  // --- Active Abilities ---
   if (abilityType === "Lightning Dash") {
-    const dashDist = isSuper ? 250 : 150;
-    const startX = attacker.x;
-    const startY = attacker.y;
-
-    // Teleport forward
-    attacker.x += Math.cos(attacker.facing) * dashDist;
-    attacker.y += Math.sin(attacker.facing) * dashDist;
-
-    // Dash trail limits
-    for (let i = 0; i < 10; i++) {
-      const rx = startX + (attacker.x - startX) * (i / 10);
-      const ry = startY + (attacker.y - startY) * (i / 10);
-      state.particles.push(createParticle(rx, ry, "#00e5ff", 1.5));
-    }
-
-    // Damage anyone nearby at the destination
-    const bonkRange = isSuper ? 60 : 40;
-    const bonkForce = isSuper ? 1000 : 500;
-    for (const target of state.players) {
-      if (target.id === attacker.id || !target.alive) continue;
-      const dx = target.x - attacker.x;
-      const dy = target.y - attacker.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-
-      if (dist < bonkRange + target.radius) {
-        const nx = dx / dist;
-        const ny = dy / dist;
-        const force = bonkForce / target.knockbackResist;
-        target.vx += nx * force;
-        target.vy += ny * force;
-        target.stunTimer = 1.0; // Long stun for lightning!
-
-        for (let i = 0; i < 5; i++) {
-          state.particles.push(
-            createParticle(
-              (attacker.x + target.x) / 2,
-              (attacker.y + target.y) / 2,
-              "#00e5ff",
-            ),
-          );
-        }
-      }
-    }
-    return; // Exit early
+    attacker.activeAbility = "dash";
+    attacker.abilityTimer = 0.25;
+    const speed = isSuper ? 2500 : 1500;
+    attacker.vx = Math.cos(attacker.facing) * speed;
+    attacker.vy = Math.sin(attacker.facing) * speed;
+    return;
+  }
+  if (abilityType === "Stealth Dash") {
+    attacker.activeAbility = "stealth";
+    attacker.abilityTimer = 1.5; // Invisible & fast for 1.5s
+    attacker.vx += Math.cos(attacker.facing) * 800;
+    attacker.vy += Math.sin(attacker.facing) * 800;
+    return;
+  }
+  if (abilityType === "Hammer Spin") {
+    attacker.activeAbility = "spin";
+    attacker.abilityTimer = 1.0;
+    attacker.knockbackResist = 2; // Uninterruptible momentum
+    return;
+  }
+  if (abilityType === "Jelly Bounce") {
+    attacker.activeAbility = "bounce";
+    attacker.abilityTimer = 0.5;
+    attacker.vx += Math.cos(attacker.facing) * 1200;
+    attacker.vy += Math.sin(attacker.facing) * 1200;
+    return;
+  }
+  if (abilityType === "Butter Slide" || abilityType === "Ice Slide") {
+    attacker.activeAbility = abilityType === "Butter Slide" ? "butter" : "ice";
+    attacker.abilityTimer = 0.8;
+    const speed = isSuper ? 1600 : 1000;
+    attacker.vx = Math.cos(attacker.facing) * speed;
+    attacker.vy = Math.sin(attacker.facing) * speed;
+    return;
   }
 
-  // --- Blobette: Bubble Shield ---
-  if (abilityType === "Bubble Shield") {
-    const bonkRange = isSuper ? 120 : 80;
-    const bonkForce = isSuper ? 1500 : 800; // Very high push, but short range
+  // --- Instant Cast Abilities ---
+  let bonkRange = isSuper ? 75 : 50;
+  let bonkForce = isSuper ? 1200 : 600;
 
-    // Giant bubble wave
+  if (abilityType === "Bubble Shield") {
+    bonkRange = isSuper ? 120 : 80;
+    bonkForce = isSuper ? 1500 : 800;
     for (let i = 0; i < (isSuper ? 20 : 12); i++) {
-      const angle = (i / (isSuper ? 20 : 12)) * Math.PI * 2;
-      state.particles.push({
-        x: attacker.x + Math.cos(angle) * 30,
-        y: attacker.y + Math.sin(angle) * 30,
-        vx: Math.cos(angle) * 200,
-        vy: Math.sin(angle) * 200,
-        life: 0.4,
-        maxLife: 0.4,
-        color: "#ff6b9d",
-        size: 15, // Giant bubbles
+        const angle = (i / (isSuper ? 20 : 12)) * Math.PI * 2;
+        state.particles.push({
+            x: attacker.x + Math.cos(angle)*30, y: attacker.y + Math.sin(angle)*30,
+            vx: Math.cos(angle)*200, vy: Math.sin(angle)*200,
+            life: 0.4, maxLife: 0.4, color: "#ff6b9d", size: 15
+        });
+    }
+  } else if (abilityType === "Belly Slam") {
+    bonkRange = isSuper ? 110 : 80;
+    bonkForce = isSuper ? 2000 : 1200;
+    attacker.stunTimer = 0.4; // Recovery penalty for Chunko
+  } else if (abilityType === "Spike Roll") {
+    bonkRange = isSuper ? 70 : 50;
+    bonkForce = isSuper ? 1100 : 700;
+    for (let i = 0; i < 3; i++) {
+      state.hazards.push({
+        x: attacker.x + (Math.random()-0.5)*100,
+        y: attacker.y + (Math.random()-0.5)*100,
+        type: "trap",
+        radius: 15,
+        alive: true,
+        cooldown: 0,
+        life: 5,
+        maxLife: 5
       });
     }
-
-    for (const target of state.players) {
-      if (target.id === attacker.id || !target.alive) continue;
-      const dx = target.x - attacker.x;
-      const dy = target.y - attacker.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-
-      if (dist < bonkRange + target.radius) {
-        const nx = dx / dist;
-        const ny = dy / dist;
-        const force = bonkForce / target.knockbackResist;
-        target.vx += nx * force;
-        target.vy += ny * force;
-        target.stunTimer = 0.2; // Tiny stun, mostly just huge push
-      }
+  } else if (abilityType === "Lava Burst") {
+    bonkRange = isSuper ? 90 : 60;
+    bonkForce = isSuper ? 1200 : 700;
+    for (let i = 0; i < 15; i++) {
+      state.particles.push(createParticle(attacker.x, attacker.y, "#ff7043", 2));
     }
-    return; // Exit early
+  } else if (abilityType === "Cloud Jump") {
+    bonkRange = isSuper ? 100 : 75;
+    bonkForce = isSuper ? 900 : 500;
+    attacker.knockbackResist = 3;
+    setTimeout(() => { if (attacker.alive) attacker.knockbackResist = 1; }, 500);
+    for (let i = 0; i < 15; i++) {
+      state.particles.push(createParticle(attacker.x, attacker.y, "#ffffff", 2));
+    }
   }
 
-  // --- Default processing (Bonky's Ground Pound / Fallback) ---
-  const bonkRange = isSuper ? 75 : 50;
-  const bonkForce = isSuper ? 1200 : 600;
-
+  // Apply instant force
   for (const target of state.players) {
     if (target.id === attacker.id || !target.alive) continue;
-
     const dx = target.x - attacker.x;
     const dy = target.y - attacker.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
@@ -720,35 +780,27 @@ function performBonk(state: GameState, attacker: Player) {
       const force = bonkForce / target.knockbackResist;
       target.vx += nx * force;
       target.vy += ny * force;
-      target.stunTimer = 0.3;
-
-      // Impact particles
+      target.stunTimer = abilityType === "Belly Slam" ? 0.8 : 0.3;
+      
       const impactX = (attacker.x + target.x) / 2;
       const impactY = (attacker.y + target.y) / 2;
       for (let i = 0; i < 8; i++) {
         state.particles.push(createParticle(impactX, impactY, "#FFD700"));
       }
-      state.particles.push(createParticle(impactX, impactY - 10, "#ffffff", 2));
     }
   }
 
-  // Bonk wave particles
-  const particleCount = isSuper ? 12 : 6;
-  const particleColor = isSuper ? "#ff1744" : "#FFD700";
-
-  for (let i = 0; i < particleCount; i++) {
-    const angle =
-      attacker.facing + (Math.random() - 0.5) * (isSuper ? 2.5 : 1.5);
-    state.particles.push({
-      x: attacker.x + Math.cos(angle) * 25,
-      y: attacker.y + Math.sin(angle) * 25,
-      vx: Math.cos(angle) * (isSuper ? 250 : 150),
-      vy: Math.sin(angle) * (isSuper ? 250 : 150),
-      life: 0.3,
-      maxLife: 0.3,
-      color: particleColor,
-      size: isSuper ? 10 : 6,
-    });
+  // Generic instant particles
+  if (abilityType !== "Bubble Shield" && abilityType !== "Cloud Jump" && abilityType !== "Lava Burst") {
+    const pColor = isSuper ? "#ff1744" : "#FFD700";
+    for (let i = 0; i < (isSuper ? 12 : 6); i++) {
+      const angle = attacker.facing + (Math.random() - 0.5) * 2;
+      state.particles.push({
+        x: attacker.x + Math.cos(angle) * 25, y: attacker.y + Math.sin(angle) * 25,
+        vx: Math.cos(angle) * 250, vy: Math.sin(angle) * 250,
+        life: 0.3, maxLife: 0.3, color: pColor, size: isSuper ? 10 : 6
+      });
+    }
   }
 }
 
@@ -812,12 +864,41 @@ function findNearest(state: GameState, from: Player): Player | null {
 
 function spawnPowerUp(state: GameState) {
   if (state.powerUps.length >= 3) return;
-  const angle = Math.random() * Math.PI * 2;
-  const dist = Math.random() * state.arenaRadius * 0.6;
   const types: PowerUp["type"][] = ["speed", "size", "superBonk", "shield"];
+  
+  let bestX = state.arenaCenter.x;
+  let bestY = state.arenaCenter.y;
+  let maxMinDist = -1;
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const angle = Math.random() * Math.PI * 2;
+    // Math.sqrt for true random uniform radial distribution
+    const dist = Math.sqrt(Math.random()) * state.arenaRadius * 0.8;
+    const px = state.arenaCenter.x + Math.cos(angle) * dist;
+    const py = state.arenaCenter.y + Math.sin(angle) * dist;
+
+    let minDist = Infinity;
+    for (const p of state.powerUps) {
+      if (!p.alive) continue;
+      const d = Math.hypot(p.x - px, p.y - py);
+      if (d < minDist) minDist = d;
+    }
+    for (const h of state.hazards) {
+       if (!h.alive) continue;
+       const d = Math.hypot(h.x - px, h.y - py);
+       if (d < minDist) minDist = d;
+    }
+
+    if (minDist > maxMinDist) {
+      maxMinDist = minDist;
+      bestX = px;
+      bestY = py;
+    }
+  }
+
   state.powerUps.push({
-    x: state.arenaCenter.x + Math.cos(angle) * dist,
-    y: state.arenaCenter.y + Math.sin(angle) * dist,
+    x: bestX,
+    y: bestY,
     type: types[Math.floor(Math.random() * types.length)],
     radius: 12,
     alive: true,
@@ -826,37 +907,40 @@ function spawnPowerUp(state: GameState) {
 }
 
 function applyPowerUp(state: GameState, player: Player, pu: PowerUp) {
-  switch (pu.type) {
-    case "speed":
-      state.message = "⚡ Speed Boost!";
-      state.messageTimer = 1;
-      player.knockbackResist = 1.5;
-      setTimeout(() => {
-        player.knockbackResist = 1;
-      }, 5000);
-      break;
-    case "size":
-      state.message = "🔵 Size Up!";
-      state.messageTimer = 1;
-      player.radius = 30;
-      setTimeout(() => {
-        player.radius = 22;
-      }, 5000);
-      break;
-    case "superBonk":
-      state.message = "💥 Super Bonk!";
-      state.messageTimer = 1;
-      player.superBonkTimer = 5;
-      break;
-    case "shield":
-      state.message = "🛡️ Shield!";
-      state.messageTimer = 1;
-      player.knockbackResist = 3;
-      setTimeout(() => {
-        player.knockbackResist = 1;
-      }, 4000);
-      break;
+  if (player.activePower === "speed" || player.activePower === "shield") {
+    player.knockbackResist = 1;
   }
+  if (player.activePower === "size") {
+    player.radius = 22;
+  }
+
+  if (pu.type === "superBonk") {
+    state.message = "💥 Super Bonk!";
+    state.messageTimer = 1;
+    player.superBonkTimer = 5;
+  } else {
+    player.activePower = pu.type;
+    player.powerTimer = 5;
+    
+    switch (pu.type) {
+      case "speed":
+        state.message = "⚡ Speed Boost!";
+        state.messageTimer = 1;
+        player.knockbackResist = 1.5;
+        break;
+      case "size":
+        state.message = "🔵 Size Up!";
+        state.messageTimer = 1;
+        player.radius = 30;
+        break;
+      case "shield":
+        state.message = "🛡️ Shield!";
+        state.messageTimer = 1;
+        player.knockbackResist = 3;
+        break;
+    }
+  }
+
   for (let i = 0; i < 10; i++) {
     state.particles.push(createParticle(pu.x, pu.y, "#00e5ff"));
   }
@@ -864,16 +948,44 @@ function applyPowerUp(state: GameState, player: Player, pu: PowerUp) {
 
 function spawnHazard(state: GameState) {
   if (state.hazards.length >= 4) return;
-  const angle = Math.random() * Math.PI * 2;
-  const dist = Math.random() * state.arenaRadius * 0.7; // Can spawn a bit further out than powerups
   const types: Hazard["type"][] = ["ice", "trampoline"];
   const type = types[Math.floor(Math.random() * types.length)];
+  const radius = type === "ice" ? 45 : 25; // Ice patches are big, trampolines are small
+
+  let bestX = state.arenaCenter.x;
+  let bestY = state.arenaCenter.y;
+  let maxMinDist = -1;
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = Math.sqrt(Math.random()) * state.arenaRadius * 0.85; // Slightly further out allowed
+    const hx = state.arenaCenter.x + Math.cos(angle) * dist;
+    const hy = state.arenaCenter.y + Math.sin(angle) * dist;
+
+    let minDist = Infinity;
+    for (const p of state.powerUps) {
+      if (!p.alive) continue;
+      const d = Math.hypot(p.x - hx, p.y - hy);
+      if (d < minDist) minDist = d;
+    }
+    for (const h of state.hazards) {
+       if (!h.alive) continue;
+       const d = Math.hypot(h.x - hx, h.y - hy);
+       if (d < minDist) minDist = d;
+    }
+
+    if (minDist > maxMinDist) {
+      maxMinDist = minDist;
+      bestX = hx;
+      bestY = hy;
+    }
+  }
 
   state.hazards.push({
-    x: state.arenaCenter.x + Math.cos(angle) * dist,
-    y: state.arenaCenter.y + Math.sin(angle) * dist,
+    x: bestX,
+    y: bestY,
     type,
-    radius: type === "ice" ? 45 : 25, // Ice patches are big, trampolines are small
+    radius,
     alive: true,
     cooldown: 0,
   });

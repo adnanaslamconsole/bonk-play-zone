@@ -12,7 +12,7 @@ export interface LevelDef {
   };
 }
 
-export const LEVELS: LevelDef[] = Array.from({ length: 30 }, (_, i) => {
+export const LEVELS: LevelDef[] = Array.from({ length: 100 }, (_, i) => {
   const level = i + 1;
   const isBoss = level % 5 === 0;
   

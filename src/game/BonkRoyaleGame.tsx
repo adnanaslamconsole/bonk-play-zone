@@ -23,7 +23,7 @@ const BonkRoyaleGame = () => {
   const [isMultiplayer, setIsMultiplayer] = useState(false);
   const [inLobby, setInLobby] = useState(false);
   const [prefilledRoom, setPrefilledRoom] = useState<string | null>(null);
-  const [gamePhase, setGamePhase] = useState<'menu' | 'levelSelect' | 'playing' | 'paused' | 'victory' | 'gameOver'>('menu');
+  const [gamePhase, setGamePhase] = useState<'menu' | 'stage1Intro' | 'countdown' | 'levelSelect' | 'playing' | 'paused' | 'victory' | 'gameOver'>('menu');
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [scoreSaved, setScoreSaved] = useState(false);
@@ -32,6 +32,52 @@ const BonkRoyaleGame = () => {
   const [showLevelStart, setShowLevelStart] = useState(false);
   const showLevelStartRef = useRef(false);
   const prevCooldownRef = useRef(0);
+  
+  const [showStage1Popup, setShowStage1Popup] = useState(false);
+  const [countdownDisplay, setCountdownDisplay] = useState(3);
+
+  // Dynamic visual poll for engine countdown timer
+  useEffect(() => {
+    if (gamePhase === 'countdown') {
+      if (stateRef.current) {
+        setCountdownDisplay(Math.ceil(stateRef.current.countdownTimer));
+      }
+      const timer = setInterval(() => {
+        if (stateRef.current) {
+          setCountdownDisplay(Math.ceil(stateRef.current.countdownTimer));
+        }
+      }, 100);
+      return () => clearInterval(timer);
+    }
+  }, [gamePhase]);
+
+  // Stage 1 Intro Sequence Coordinator
+  useEffect(() => {
+    let fadeTimer: ReturnType<typeof setTimeout>;
+    let transitionTimer: ReturnType<typeof setTimeout>;
+
+    if (gamePhase === 'stage1Intro') {
+      setShowStage1Popup(true);
+      
+      fadeTimer = setTimeout(() => {
+        // Start fading out
+        setShowStage1Popup(false);
+        
+        // Wait for fadeout animation, then shift to countdown phase
+        transitionTimer = setTimeout(() => {
+          if (stateRef.current && stateRef.current.phase === 'stage1Intro') {
+            stateRef.current.phase = 'countdown';
+            setGamePhase('countdown');
+          }
+        }, 1000); // 1-second fade out overlap
+      }, 3000); // Show popup for 3s
+    }
+
+    return () => {
+      clearTimeout(fadeTimer);
+      clearTimeout(transitionTimer);
+    };
+  }, [gamePhase]);
 
 
   // Watch for Booster Ready Signal
@@ -77,6 +123,7 @@ const BonkRoyaleGame = () => {
   const [showMobileControls, setShowMobileControls] = useState(false);
   const [joystickPos, setJoystickPos] = useState({ x: 100, y: 100, active: false });
   const joystickRef = useRef<{ active: boolean; startX: number; startY: number }>({ active: false, startX: 0, startY: 0 });
+  const stickRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // Detect room and mode from URL
@@ -169,10 +216,9 @@ const BonkRoyaleGame = () => {
     };
 
     stateRef.current = createInitialState(w, h, selectedChar, isMultiplayer, 1, selectedLevel || 0, maxTime);
-    if (networkManager.role === 'host') {
-      stateRef.current.phase = 'playing'; // Network games start immediately upon entering the arena
-    } else if (!isMultiplayer) {
-      stateRef.current.phase = 'playing'; // Arcade levels start immediately
+    if (networkManager.role !== 'client') {
+      stateRef.current.phase = 'stage1Intro';
+      stateRef.current.countdownTimer = 5.0;
     }
     setGamePhase(stateRef.current.phase);
     setScoreSaved(false);
@@ -314,7 +360,7 @@ const BonkRoyaleGame = () => {
       stopBackgroundMusic();
       networkManager.disconnect();
     };
-  }, [selectedChar, selectedLevel, inLobby, getCanvasSize, handleSoundEvents, saveScore, isMultiplayer, gamePhase]);
+  }, [selectedChar, selectedLevel, inLobby, getCanvasSize, handleSoundEvents, saveScore, isMultiplayer]);
 
   const handleJoystickStart = (e: React.TouchEvent) => {
     e.preventDefault();
@@ -335,11 +381,19 @@ const BonkRoyaleGame = () => {
     const dist = Math.sqrt(dx * dx + dy * dy);
     const clamp = Math.min(dist, maxDist);
     if (dist > 5) {
-      inputRef.current.touchMoveX = (dx / dist) * (clamp / maxDist);
-      inputRef.current.touchMoveY = (dy / dist) * (clamp / maxDist);
+      const normX = (dx / dist) * (clamp / maxDist);
+      const normY = (dy / dist) * (clamp / maxDist);
+      inputRef.current.touchMoveX = normX;
+      inputRef.current.touchMoveY = normY;
+      if (stickRef.current) {
+        stickRef.current.style.transform = `translate(${normX * 44}px, ${normY * 44}px)`;
+      }
     } else {
       inputRef.current.touchMoveX = 0;
       inputRef.current.touchMoveY = 0;
+      if (stickRef.current) {
+        stickRef.current.style.transform = `translate(0px, 0px)`;
+      }
     }
   };
 
@@ -349,6 +403,9 @@ const BonkRoyaleGame = () => {
     inputRef.current.touchActive = false;
     inputRef.current.touchMoveX = 0;
     inputRef.current.touchMoveY = 0;
+    if (stickRef.current) {
+       stickRef.current.style.transform = `translate(0px, 0px)`;
+    }
   };
 
   const handleBonkBtn = () => {
@@ -362,6 +419,11 @@ const BonkRoyaleGame = () => {
         setScoreSaved(false);
         if (selectedChar) {
           stateRef.current = resetGame(stateRef.current, w, h, selectedChar, isMultiplayer);
+          if (networkManager.role !== 'client') {
+            stateRef.current.phase = 'stage1Intro';
+            stateRef.current.countdownTimer = 5.0;
+            setGamePhase('stage1Intro');
+          }
         }
       }
     }
@@ -435,8 +497,42 @@ const BonkRoyaleGame = () => {
         style={{ touchAction: 'none' }}
       />
 
-      {/* Level Start Splash Banner */}
       <AnimatePresence>
+        {/* Stage 1 Special Popup */}
+        {showStage1Popup && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.1 }}
+            transition={{ duration: 0.8, ease: "easeOut" }}
+            className="absolute inset-0 z-[80] flex items-center justify-center pointer-events-none bg-black/50 backdrop-blur-sm"
+          >
+            <div className="bg-card/90 border border-primary/50 px-10 py-12 rounded-[3rem] shadow-[0_0_50px_rgba(var(--primary),0.3)] text-center max-w-lg">
+              <h2 className="text-4xl sm:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-br from-white to-primary mb-6 uppercase tracking-widest font-display">
+                {selectedLevel === 1 ? "Ready to Bonk?" : (selectedLevel ? `Stage ${selectedLevel}` : `Round ${stateRef.current?.round || 1}`)}
+              </h2>
+              <p className="text-lg text-white/80 font-bold mb-4">
+                Survive the arena, collect power-ups, and smash your foes.
+              </p>
+              <div className="flex gap-4 justify-center mt-6">
+                 <div className="flex flex-col items-center gap-2">
+                    <span className="text-2xl">🕹️</span>
+                    <span className="text-[10px] text-white/50 font-bold uppercase">Move</span>
+                 </div>
+                 <div className="flex flex-col items-center gap-2">
+                    <span className="text-2xl">⚡</span>
+                    <span className="text-[10px] text-white/50 font-bold uppercase">Boost</span>
+                 </div>
+                 <div className="flex flex-col items-center gap-2">
+                    <span className="text-2xl">💥</span>
+                    <span className="text-[10px] text-white/50 font-bold uppercase">Bonk</span>
+                 </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+      {/* Level Start Splash Banner */}
         {showLevelStart && selectedLevel && (
           <motion.div
             initial={{ opacity: 0 }}
@@ -475,6 +571,28 @@ const BonkRoyaleGame = () => {
                 <p className="mt-6 text-white/60 text-[9px] font-bold uppercase tracking-[0.2em] animate-pulse">Eliminate All Enemies</p>
               </div>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Countdown Overlay */}
+      <AnimatePresence>
+        {gamePhase === 'countdown' && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.5 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.5 }}
+            className="absolute inset-0 z-[80] flex items-center justify-center pointer-events-none select-none"
+          >
+            <motion.h1 
+              key={countdownDisplay}
+              initial={{ scale: 2, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="text-9xl font-black text-white drop-shadow-[0_10px_30px_rgba(0,0,0,0.8)] font-display"
+            >
+              {countdownDisplay > 0 ? countdownDisplay : "GO!"}
+            </motion.h1>
           </motion.div>
         )}
       </AnimatePresence>
@@ -546,12 +664,10 @@ const BonkRoyaleGame = () => {
             
             {/* High-Fidelity Handle */}
             <div 
-              className={`w-16 h-16 rounded-full bg-gradient-to-br from-white/40 via-white/20 to-transparent border border-white/50 shadow-[0_10px_25px_rgba(0,0,0,0.6)] flex items-center justify-center relative z-10 active:scale-95 transition-transform duration-75 ${
+              ref={stickRef}
+              className={`w-16 h-16 rounded-full bg-gradient-to-br from-white/40 via-white/20 to-transparent border border-white/50 shadow-[0_10px_25px_rgba(0,0,0,0.6)] flex items-center justify-center relative z-10 active:scale-95 ${
                 !joystickPos.active ? 'opacity-50' : ''
               }`}
-              style={{
-                transform: `translate(${inputRef.current.touchMoveX * 44}px, ${inputRef.current.touchMoveY * 44}px)`,
-              }}
             >
               <div className="w-6 h-6 rounded-full bg-white/50 blur-[1px] shadow-inner" />
               {/* Pro Halo Glow */}
@@ -565,6 +681,22 @@ const BonkRoyaleGame = () => {
 
             {/* Micro Satellite Cluster with Unified HUD */}
             <div className="flex flex-col items-end gap-3 pointer-events-none">
+              {/* Active Power Indicator */}
+              {(() => {
+                const p = stateRef.current?.players.find((p) => p.isPlayer);
+                if (!p || !p.activePower) return null;
+                const ratio = p.powerTimer / 5.0; // max 5s
+                const icons = { speed: '⚡ Speed', size: '🔵 Size', shield: '🛡️ Shield' };
+                return (
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-white/20 shadow-lg pointer-events-auto">
+                     <span className="text-[10px] font-black text-white uppercase tracking-wider">{icons[p.activePower as keyof typeof icons]}</span>
+                     <div className="w-16 h-2 bg-white/10 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-cyan-400 to-blue-500 transition-all duration-75" style={{ width: `${Math.max(0, ratio) * 100}%` }} />
+                     </div>
+                  </div>
+                );
+              })()}
+
               {/* Status Label (Glass Look) */}
               {(() => {
                 const p = stateRef.current?.players.find((p) => p.isPlayer);
@@ -779,65 +911,129 @@ const BonkRoyaleGame = () => {
 
       {/* 3. Game Over Overlay (GameOver Phase) */}
       {gamePhase === 'gameOver' && (
-        <div className="absolute inset-0 bg-black/90 backdrop-blur-xl z-[60] flex flex-col items-center justify-center p-6 text-center">
+        <div className="absolute inset-0 bg-black/90 backdrop-blur-2xl z-[70] flex flex-col items-center justify-center p-6 text-center select-none overflow-hidden">
+          {/* Animated Background Commiseration */}
+          <div className="absolute inset-0 overflow-hidden pointer-events-none grayscale">
+            <motion.div 
+              animate={{ 
+                scale: [1, 1.1, 1],
+                opacity: [0.1, 0.15, 0.1]
+              }}
+              transition={{ duration: 4, repeat: Infinity }}
+              className="absolute top-1/4 left-1/4 w-96 h-96 bg-red-600/20 rounded-full blur-[150px]" 
+            />
+            <motion.div 
+              animate={{ 
+                scale: [1.1, 1, 1.1],
+                opacity: [0.1, 0.15, 0.1]
+              }}
+              transition={{ duration: 5, repeat: Infinity, delay: 0.5 }}
+              className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-orange-600/20 rounded-full blur-[150px]" 
+            />
+          </div>
+
           <motion.div 
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="max-w-sm w-full"
+            initial={{ opacity: 0, scale: 0.7, y: 100 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ type: "spring", damping: 12 }}
+            className="relative z-10 max-w-md w-full bg-white/5 border border-red-500/40 backdrop-blur-3xl rounded-[4rem] p-8 sm:p-12 shadow-[0_0_150px_rgba(239,68,68,0.15)] ring-1 ring-white/10"
           >
-            <div className={`text-7xl mb-6 ${stateRef.current?.players.find(p => p.isPlayer)?.alive ? 'animate-bounce' : 'grayscale'}`}>
-              {stateRef.current?.players.find(p => p.isPlayer)?.alive ? '🏆' : '💀'}
-            </div>
-            <h2 className={`text-6xl font-black mb-6 tracking-tighter uppercase font-display ${stateRef.current?.players.find(p => p.isPlayer)?.alive ? 'text-yellow-400' : 'text-red-500'}`}>
-              {stateRef.current?.players.find(p => p.isPlayer)?.alive ? 'Victory!' : (selectedLevel ? 'START AGAIN?' : 'Bonked!')}
-            </h2>
-            <div className="bg-white/5 border border-white/10 backdrop-blur-3xl rounded-[2.5rem] p-8 mb-8 shadow-2xl relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent pointer-events-none" />
-              
-              {/* Dynamic Game Message */}
-              <p className="text-white/60 text-xs font-bold uppercase tracking-widest mb-4">
-                {stateRef.current?.message || 'Game Over'}
-              </p>
+            {/* Defeat Badge */}
+            <motion.div
+              initial={{ rotate: -10, scale: 0 }}
+              animate={{ rotate: 0, scale: 1 }}
+              transition={{ delay: 0.3, type: "spring" }}
+              className="absolute -top-6 left-1/2 -translate-x-1/2 bg-gradient-to-r from-red-600 to-orange-700 px-6 py-2 rounded-2xl shadow-xl border border-white/20"
+            >
+              <span className="text-[10px] font-black text-white uppercase tracking-[0.4em]">
+                {stateRef.current?.players.find(p => p.isPlayer)?.alive ? 'Match Over' : 'Eliminated'}
+              </span>
+            </motion.div>
 
-              <p className="text-white/40 text-[10px] font-black uppercase tracking-[0.4em] mb-2">Final Score</p>
-              <p className="text-white text-5xl font-black mb-6 tracking-tighter">{stateRef.current?.playerScore || 0}</p>
-              
-              <div className="flex justify-between items-center text-[11px] font-black mb-6">
-                <span className="text-white/30 uppercase tracking-[0.2em]">Level Progress</span>
-                <span className="text-yellow-400">STAGE {selectedLevel || stateRef.current?.round || 1}</span>
-              </div>
-              
-              {/* Minified Leaderboard inside Game Over */}
-              <div className="space-y-2 mt-2 border-t border-white/10 pt-6">
-                {leaderboard.slice(0, 3).map((entry, i) => (
-                  <div key={i} className="flex justify-between items-center text-[11px] font-bold">
-                    <span className="text-white/40 uppercase tracking-tighter">{i+1}. {entry.name}</span>
-                    <span className="text-yellow-400/80 font-mono">{entry.score}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <motion.h1 
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.4 }}
+              className={`text-6xl sm:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white via-red-200 to-red-600 mb-2 font-display uppercase tracking-tighter filter drop-shadow-[0_10px_10px_rgba(0,0,0,0.5)]`}
+            >
+              {stateRef.current?.players.find(p => p.isPlayer)?.alive ? 'VICTORY!' : 'BONKED!'}
+            </motion.h1>
 
-            <div className="flex gap-4">
-              <button 
-                onClick={() => { 
-                  setGamePhase(isMultiplayer ? 'menu' : 'levelSelect');
-                  if (stateRef.current) stateRef.current.phase = isMultiplayer ? 'menu' : 'levelSelect';
-                }}
-                className="flex-1 h-16 bg-white/5 hover:bg-white/10 border border-white/10 rounded-3xl text-white/50 font-black text-sm uppercase tracking-widest active:scale-95 transition-all outline-none"
-              >
-                Quit
-              </button>
-              <button 
+            <motion.p 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.6 }}
+              className="text-white/60 text-xs font-bold uppercase tracking-[0.3em] mb-10"
+            >
+              {stateRef.current?.message || 'Better luck next time.'}
+            </motion.p>
+            
+            {/* Score & Progression */}
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: 0.8 }}
+              className="bg-black/40 rounded-3xl p-6 mb-10 border border-white/5"
+            >
+               <p className="text-white/40 text-[10px] font-black uppercase tracking-[0.4em] mb-2">Final Score</p>
+               <p className="text-white text-5xl font-black mb-0 tracking-tighter">{stateRef.current?.playerScore || 0}</p>
+            </motion.div>
+
+            <div className="flex flex-col gap-4 mt-8">
+              <motion.button 
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 1.2 }}
                 onClick={() => { 
                   setScoreSaved(false);
                   const { w, h } = getCanvasSize();
                   stateRef.current = resetGame(stateRef.current!, w, h, selectedChar!, isMultiplayer);
+                  if (networkManager.role !== 'client') {
+                    stateRef.current.phase = 'stage1Intro';
+                    stateRef.current.countdownTimer = 5.0;
+                    setGamePhase('stage1Intro');
+                  }
                 }}
-                className={`flex-[2] h-16 ${stateRef.current?.players.find(p => p.isPlayer)?.alive ? 'bg-gradient-to-r from-yellow-400 to-orange-600' : 'bg-gradient-to-r from-cyan-400 to-blue-600'} rounded-3xl text-white font-black text-xl shadow-xl active:scale-95 transition-all outline-none`}
+                className={`w-full h-20 rounded-[2.5rem] text-white font-black text-2xl active:scale-95 transition-all outline-none border-4 border-white/20 group relative overflow-hidden ${
+                  stateRef.current?.players.find(p => p.isPlayer)?.alive 
+                    ? 'bg-gradient-to-r from-yellow-400 via-orange-500 to-yellow-600 shadow-[0_20px_50px_rgba(250,204,21,0.4)]'
+                    : 'bg-gradient-to-r from-red-500 via-orange-500 to-red-600 shadow-[0_20px_50px_rgba(239,68,68,0.4)]'
+                }`}
               >
-                {stateRef.current?.players.find(p => p.isPlayer)?.alive ? 'PLAY AGAIN' : (selectedLevel ? 'START AGAIN' : 'RETRY')}
-              </button>
+                <div className="absolute inset-0 bg-white/20 -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                <span className="relative z-10 flex items-center justify-center gap-3">
+                  {stateRef.current?.players.find(p => p.isPlayer)?.alive ? 'PLAY AGAIN' : (selectedLevel ? 'RETRY STAGE' : 'RETRY')}
+                  <span className="text-3xl">↻</span>
+                </span>
+              </motion.button>
+              
+              <div className="grid grid-cols-2 gap-4 mt-2">
+                <motion.button 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 1.6 }}
+                  onClick={() => { 
+                    setGamePhase(isMultiplayer ? 'menu' : 'levelSelect');
+                    if (stateRef.current) stateRef.current.phase = isMultiplayer ? 'menu' : 'levelSelect';
+                  }}
+                  className="h-14 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-white/50 font-black text-[10px] uppercase tracking-widest active:scale-95 transition-all outline-none"
+                >
+                  {isMultiplayer ? 'MAIN MENU' : 'LEVEL SELECT'}
+                </motion.button>
+                <motion.button 
+                   initial={{ opacity: 0 }}
+                   animate={{ opacity: 1 }}
+                   transition={{ delay: 1.8 }}
+                   onClick={() => { 
+                     setGamePhase('menu');
+                     setSelectedChar(null);
+                     setSelectedLevel(null);
+                   }}
+                   className="h-14 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-white/50 font-black text-[10px] uppercase tracking-widest active:scale-95 transition-all outline-none"
+                >
+                   CHANGE HERO
+                </motion.button>
+              </div>
             </div>
           </motion.div>
         </div>
@@ -925,10 +1121,9 @@ const BonkRoyaleGame = () => {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 1.2 }}
                 onClick={() => { 
-                  if (selectedLevel && selectedLevel < 30) {
+                  if (selectedLevel && selectedLevel < 100) {
                     const nextLvl = selectedLevel + 1;
                     setSelectedLevel(nextLvl);
-                    setGamePhase('playing');
                     // Reset game state for next level happens via useEffect watching selectedLevel
                   } else {
                     setGamePhase('levelSelect');
@@ -938,7 +1133,7 @@ const BonkRoyaleGame = () => {
               >
                 <div className="absolute inset-0 bg-white/20 -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
                 <span className="relative z-10 flex items-center justify-center gap-3">
-                  {selectedLevel === 1 ? 'START LEVEL 2' : selectedLevel && selectedLevel < 30 ? 'NEXT STAGE' : 'ALL CLEAR!'}
+                  {selectedLevel === 1 ? 'START LEVEL 2' : selectedLevel && selectedLevel < 100 ? 'NEXT STAGE' : 'ALL CLEAR!'}
                   <span className="text-3xl">→</span>
                 </span>
               </motion.button>

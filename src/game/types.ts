@@ -26,6 +26,10 @@ export interface Player {
   superBonkTimer: number;
   boosterTimer: number;
   boosterCooldown: number;
+  activeAbility: string | null;
+  abilityTimer: number;
+  activePower: 'speed' | 'size' | 'shield' | null;
+  powerTimer: number;
 }
 
 export interface PowerUp {
@@ -59,13 +63,15 @@ export interface Hazard {
   vy?: number; // For moving
   anchorX?: number;
   anchorY?: number;
+  life?: number;
+  maxLife?: number;
 }
 
 export type SoundEvent = 'bonk' | 'elimination' | 'powerup' | 'victory' | 'defeat';
 
 export interface GameState {
-  phase: 'menu' | 'levelSelect' | 'playing' | 'paused' | 'victory' | 'gameOver';
-  level: number; // Current Level (1-30), 0 if multiplayer/endless
+  phase: 'menu' | 'stage1Intro' | 'countdown' | 'levelSelect' | 'playing' | 'paused' | 'victory' | 'gameOver';
+  level: number; // Current Level (1-100), 0 if multiplayer/endless
   players: Player[];
   powerUps: PowerUp[];
   particles: Particle[];
@@ -82,4 +88,5 @@ export interface GameState {
   messageTimer: number;
   soundEvents: SoundEvent[];
   theme: ArenaTheme;
+  countdownTimer: number;
 }
