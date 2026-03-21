@@ -1,4 +1,4 @@
-import { GameState, Player, Vec2 } from './types';
+import { GameState, Player, Vec2, SelectedCharacter } from './types';
 import { CharacterDef } from './characters';
 import Peer, { DataConnection } from 'peerjs';
 
@@ -27,7 +27,7 @@ class NetworkManager {
   private hostConnection: DataConnection | null = null;
   
   // Lobby state
-  public playersInRoom: { id: string, name: string, character: CharacterDef }[] = [];
+  public playersInRoom: { id: string, name: string, character: SelectedCharacter }[] = [];
   
   // Remote Inputs (Host receives these)
   public remoteInputs: Record<string, RemoteInput> = {};
@@ -46,7 +46,7 @@ class NetworkManager {
   public onLobbyExpired: (() => void) | null = null;
   public onPeerInitialized: ((id: string) => void) | null = null;
   
-  createRoom(hostName: string, hostChar: CharacterDef): Promise<string> {
+  createRoom(hostName: string, hostChar: SelectedCharacter): Promise<string> {
     return new Promise((resolve, reject) => {
       this.role = 'host';
       this.peer = new Peer({ debug: 2 });
@@ -144,7 +144,7 @@ class NetworkManager {
     });
   }
 
-  joinRoom(roomId: string, clientName: string, clientChar: CharacterDef): Promise<void> {
+  joinRoom(roomId: string, clientName: string, clientChar: SelectedCharacter): Promise<void> {
     return new Promise((resolve, reject) => {
       this.role = 'client';
       this.roomId = roomId;

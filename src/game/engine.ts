@@ -1,6 +1,8 @@
-import { GameState, Player, PowerUp, Particle, Hazard } from "./types";
+import { GameState, Player, PowerUp, Particle, Hazard, GameMode } from "./types";
 import { CharacterDef, CHARACTERS } from "./characters";
-import { getThemeForRound } from "./arenaThemes";
+import { SelectedCharacter } from "./types";
+import { getThemeForRound, ARENA_THEMES } from "./arenaThemes";
+import { getMonsterForLevel, MONSTERS } from "./monsters";
 import { networkManager } from "./NetworkManager";
 import { LEVELS } from "./levels";
 
@@ -18,25 +20,29 @@ const BOT_COLORS = [
 export function createInitialState(
   canvasW: number,
   canvasH: number,
-  playerChar?: CharacterDef,
+  playerChar?: SelectedCharacter,
   isMultiplayer = false,
   round = 1,
   level = 0,
   maxTime = 0,
+  nextBossRound?: number,
+  gameMode: GameMode = 'single-player',
 ): GameState {
   const isMobile = canvasW < 768;
-  const arenaR = isMobile
+  const arenaR = isMultiplayer ? 400 : (isMobile
     ? Math.min(canvasW, canvasH) * 0.48
-    : Math.min(canvasW, canvasH) * 0.42;
-  const playerRadius = isMobile ? 12 : 22;
+    : Math.min(canvasW, canvasH) * 0.42);
+  const playerRadius = isMultiplayer ? 22 : (isMobile ? 12 : 22);
 
   // Center shifted up for mobile ergonomics (portrait mode)
   const cx = canvasW / 2;
   const cy = isMobile ? canvasH * 0.42 : canvasH / 2;
 
   const players: Player[] = [];
-  const char = playerChar || CHARACTERS[0];
+  const char = playerChar ? playerChar.character : CHARACTERS[0];
+  const selectedSkin = playerChar ? char.skins.find(s => s.id === playerChar.skinId) || char.defaultSkin : char.defaultSkin;
   const levelDef = level > 0 ? LEVELS.find(l => l.number === level) : null;
+  const isBossRound = (nextBossRound === round && round > 0 && !isMultiplayer) || (levelDef?.monster ? true : false);
 
   // Dynamic Bot Scaling: Level 1 (4 players), Level 2 (7), etc. Max 20.
   const totalSlots = levelDef ? levelDef.totalEnemies + 1 : Math.min(20, 1 + (round * 3));
@@ -81,14 +87,15 @@ export function createInitialState(
     networkPlayers.forEach((lobbyPlayer, i) => {
       const pos = getSpawnPoint(i, slots, arenaR);
       const isLocal = lobbyPlayer.id === networkManager.playerId;
+      const selectedSkin = lobbyPlayer.character.character.skins.find(s => s.id === lobbyPlayer.character.skinId) || lobbyPlayer.character.character.defaultSkin;
       players.push(
         createPlayer(
           lobbyPlayer.id,
           lobbyPlayer.name,
           pos.x,
           pos.y,
-          lobbyPlayer.character.color,
-          lobbyPlayer.character.eyeColor,
+          selectedSkin.color,
+          selectedSkin.eyeColor,
           isLocal,
           playerRadius,
         ),
@@ -104,29 +111,48 @@ export function createInitialState(
         char.name,
         playerPos.x,
         playerPos.y,
-        char.color,
-        char.eyeColor,
+        selectedSkin.color,
+        selectedSkin.eyeColor,
         true,
         playerRadius,
       ),
     );
 
-    const botChars = CHARACTERS.filter((c) => c.id !== char.id);
-    for (let i = 1; i < totalSlots; i++) {
-      const pos = getSpawnPoint(i, totalSlots, arenaR);
-      const bc = botChars[i % botChars.length];
-      players.push(
-        createPlayer(
-          `robot-${i}`,
-          `Robot ${i}`,
-          pos.x,
-          pos.y,
-          bc.color,
-          bc.eyeColor,
-          false,
-          playerRadius,
-        ),
-      );
+    if (isBossRound) {
+       // Spawn exactly ONE Boss based on level monster
+       const monster = levelDef?.monster ? MONSTERS.find(m => m.id === levelDef.monster) : null;
+       const bossPos = getSpawnPoint(1, 2, arenaR); // Spread boss and player
+       players.push(
+         createPlayer(
+           "boss-1",
+           monster?.name || "GIGA BONK",
+           bossPos.x,
+           bossPos.y,
+           monster?.color || "#ff0000",
+           monster?.eyeColor || "#000000",
+           false,
+           (monster?.size || 3) * playerRadius, // Scale size
+           true
+         )
+       );
+    } else {
+      const botChars = CHARACTERS.filter((c) => c.id !== char.id);
+      for (let i = 1; i < totalSlots; i++) {
+        const pos = getSpawnPoint(i, totalSlots, arenaR);
+        const bc = botChars[i % botChars.length];
+        players.push(
+          createPlayer(
+            `robot-${i}`,
+            `Robot ${i}`,
+            pos.x,
+            pos.y,
+            bc.defaultSkin.color,
+            bc.defaultSkin.eyeColor,
+            false,
+            playerRadius,
+          ),
+        );
+      }
     }
   }
 
@@ -174,11 +200,14 @@ export function createInitialState(
     round,
     playerScore: 0,
     shrinkTimer: 0,
-    message: "",
-    messageTimer: 0,
+    message: isBossRound ? "WARNING: BOSS INCOMING!" : "",
+    messageTimer: isBossRound ? 3.0 : 0,
     soundEvents: [],
-    theme: getThemeForRound(round),
+    theme: levelDef ? ARENA_THEMES.find(t => t.name === levelDef.theme) || getThemeForRound(round) : getThemeForRound(round),
     countdownTimer: 3.0,
+    nextBossRound,
+    isBossRound,
+    gameMode,
   };
 }
 
@@ -191,6 +220,7 @@ function createPlayer(
   eyeColor: string,
   isPlayer: boolean,
   radius = 22,
+  isBoss = false,
 ): Player {
   return {
     id,
@@ -209,7 +239,7 @@ function createPlayer(
     score: 0,
     facing: 0,
     expression: "normal",
-    knockbackResist: 1,
+    knockbackResist: isBoss ? 4.0 : 1.0,
     superBonkTimer: 0,
     boosterTimer: 0,
     boosterCooldown: 0,
@@ -217,6 +247,7 @@ function createPlayer(
     abilityTimer: 0,
     activePower: null,
     powerTimer: 0,
+    isBoss,
   };
 }
 
@@ -224,12 +255,19 @@ export function resetGame(
   state: GameState,
   canvasW: number,
   canvasH: number,
-  playerChar?: CharacterDef,
+  playerChar?: SelectedCharacter,
   isMultiplayer = false,
 ): GameState {
   const won = state.players.find(p => p.isPlayer)?.alive;
   const nextRound = won ? state.round + 1 : state.round;
-  const fresh = createInitialState(canvasW, canvasH, playerChar, isMultiplayer, nextRound, state.level, state.maxTime);
+  
+  let nextBoss = state.nextBossRound;
+  if (!nextBoss || (won && state.isBossRound)) {
+     // Trigger next boss in 3-5 waves
+     nextBoss = nextRound + Math.floor(Math.random() * 3) + 3;
+  }
+
+  const fresh = createInitialState(canvasW, canvasH, playerChar, isMultiplayer, nextRound, state.level, state.maxTime, nextBoss);
   fresh.phase = "countdown";
   fresh.playerScore = state.playerScore;
   fresh.theme = getThemeForRound(nextRound);
@@ -603,7 +641,14 @@ export function updateGame(
       if (dist < minDist && dist > 0) {
         // They are overlapping! Push them apart.
         const overlap = minDist - dist;
-        const pushTotal = overlap * 0.5 * 10; // push strength factor
+        let pushStrength = 10; // base push strength
+
+        // Bosses are much harder to push, only abilities can move them significantly
+        if (p1.isBoss || p2.isBoss) {
+          pushStrength = 1; // Very weak normal push for bosses
+        }
+
+        const pushTotal = overlap * 0.5 * pushStrength;
 
         const nx = dx / dist;
         const ny = dy / dist;
@@ -649,7 +694,12 @@ export function updateGame(
     s.message = s.level > 0 ? "You Died! Try Again!" : `Game Over! Score: ${s.playerScore}`;
     s.soundEvents.push("defeat");
   } else if (aliveCount <= 1) {
-    s.playerScore += 500;
+    if (s.isBossRound) {
+       s.playerScore += 5000;
+       s.message = "BOSS DEFEATED! 🏆";
+    } else {
+       s.playerScore += 500;
+    }
     
     if (s.level > 0) {
       s.phase = "victory";
@@ -815,7 +865,9 @@ function updateAI(state: GameState, bot: Player, dt: number) {
   const dcy = bot.y - state.arenaCenter.y;
   const distCenter = Math.sqrt(dcx * dcx + dcy * dcy);
 
-  const speed = 180;
+  const speed = bot.isBoss ? 300 : 180;
+  const attackRange = bot.isBoss ? 100 : 60;
+  const chaseRange = bot.isBoss ? 600 : 200;
 
   if (distCenter > state.arenaRadius * 0.7) {
     // Move toward center
@@ -826,14 +878,15 @@ function updateAI(state: GameState, bot: Player, dt: number) {
     const dy = nearestEnemy.y - bot.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    if (dist < 60) {
+    if (dist < attackRange) {
       // Attack!
       if (bot.bonkCooldown <= 0) {
         bot.facing = Math.atan2(dy, dx);
         performBonk(state, bot);
-        bot.bonkCooldown = 0.8 + Math.random() * 0.5;
+        // Bosses have much faster attack rates
+        bot.bonkCooldown = bot.isBoss ? 0.3 : (0.8 + Math.random() * 0.5);
       }
-    } else if (dist < 200) {
+    } else if (dist < chaseRange) {
       // Chase
       bot.vx += (dx / dist) * speed * dt * 3;
       bot.vy += (dy / dist) * speed * dt * 3;

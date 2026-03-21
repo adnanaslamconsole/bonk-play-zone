@@ -1,4 +1,10 @@
 import { ArenaTheme } from './arenaThemes';
+import { CharacterDef } from './characters';
+
+export interface SelectedCharacter {
+  character: CharacterDef;
+  skinId: string;
+}
 
 export interface Vec2 {
   x: number;
@@ -30,6 +36,7 @@ export interface Player {
   abilityTimer: number;
   activePower: 'speed' | 'size' | 'shield' | null;
   powerTimer: number;
+  isBoss?: boolean;
 }
 
 export interface PowerUp {
@@ -69,6 +76,8 @@ export interface Hazard {
 
 export type SoundEvent = 'bonk' | 'elimination' | 'powerup' | 'victory' | 'defeat';
 
+export type GameMode = 'single-player' | 'bonk-arena' | 'obstacle-chaos' | 'team-bonk' | 'boss-bonk';
+
 export interface GameState {
   phase: 'menu' | 'stage1Intro' | 'countdown' | 'levelSelect' | 'playing' | 'paused' | 'victory' | 'gameOver';
   level: number; // Current Level (1-100), 0 if multiplayer/endless
@@ -89,4 +98,7 @@ export interface GameState {
   soundEvents: SoundEvent[];
   theme: ArenaTheme;
   countdownTimer: number;
+  nextBossRound?: number;
+  isBossRound?: boolean;
+  gameMode: GameMode;
 }

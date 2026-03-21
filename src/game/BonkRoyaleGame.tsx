@@ -2,7 +2,8 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Home, User, Trophy } from 'lucide-react';
 import { createInitialState, updateGame, renderGame, resetGame } from './engine';
-import { GameState, SoundEvent } from './types';
+import { useIsMobile } from '../hooks/use-mobile';
+import { GameState, SoundEvent, GameMode, SelectedCharacter } from './types';
 import { CharacterDef } from './characters';
 import CharacterSelect from './CharacterSelect';
 import { addScore, getLeaderboard, isHighScore, LeaderboardEntry } from './leaderboard';
@@ -14,27 +15,45 @@ import {
 import PartyLobby from './PartyLobby';
 import { networkManager } from './NetworkManager';
 import LevelSelect from './LevelSelect';
-import { loadProgress, saveLevelCompletion } from './progressStore';
+import { loadProgress, saveLevelCompletion, addXP, addCharacterXP, addCoins, addLootBox, openLootBox, claimDailyReward, getDailyRewardStatus, purchaseAndOpenLootBox, recordLogin, DailyRewardStatus } from './progressStore';
+import { getDailyChallenges, updateDailyChallenge } from './dailyChallenges';
 import { LEVELS } from './levels';
+import Store from './Store';
+import DailyRewardModal from './DailyRewardModal';
+import LootboxRewardModal from './LootboxRewardModal';
+import { trackEvent } from '../lib/analytics';
+import { LootboxReward } from './lootbox';
+import { isSoundMuted, playSound, toggleSoundMuted } from './soundManager';
 
 const BonkRoyaleGame = () => {
-  const [selectedChar, setSelectedChar] = useState<CharacterDef | null>(null);
+  const [selectedChar, setSelectedChar] = useState<SelectedCharacter | null>(null);
   const [selectedLevel, setSelectedLevel] = useState<number | null>(null);
   const [isMultiplayer, setIsMultiplayer] = useState(false);
   const [inLobby, setInLobby] = useState(false);
   const [prefilledRoom, setPrefilledRoom] = useState<string | null>(null);
+  const [gameMode, setGameMode] = useState<GameMode>('single-player');
   const [gamePhase, setGamePhase] = useState<'menu' | 'stage1Intro' | 'countdown' | 'levelSelect' | 'playing' | 'paused' | 'victory' | 'gameOver'>('menu');
-  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [showLootBox, setShowLootBox] = useState(false);
+  const [lootBoxReward, setLootBoxReward] = useState<LootboxReward | null>(null);
+  const [showStore, setShowStore] = useState(false);
+  const [showDailyReward, setShowDailyReward] = useState(false);
+  const [dailyRewardStatus, setDailyRewardStatus] = useState<DailyRewardStatus | null>(null);
+  const [progressTick, setProgressTick] = useState(0);
+  const [soundMuted, setSoundMuted] = useState(isSoundMuted());
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [scoreSaved, setScoreSaved] = useState(false);
   const [showBoostBlast, setShowBoostBlast] = useState(false);
+  const isMobile = useIsMobile();
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [starsEarned, setStarsEarned] = useState(0);
   const [showLevelStart, setShowLevelStart] = useState(false);
   const showLevelStartRef = useRef(false);
   const prevCooldownRef = useRef(0);
+  const prevGamePhaseRef = useRef(gamePhase);
   
   const [showStage1Popup, setShowStage1Popup] = useState(false);
   const [countdownDisplay, setCountdownDisplay] = useState(3);
+  const progressSnapshot = loadProgress();
 
   // Dynamic visual poll for engine countdown timer
   useEffect(() => {
@@ -98,6 +117,7 @@ const BonkRoyaleGame = () => {
   // Level Start Banner Trigger
   useEffect(() => {
     if (selectedLevel) {
+      playSound('level_start');
       setShowLevelStart(true);
       showLevelStartRef.current = true;
       const timer = setTimeout(() => {
@@ -144,6 +164,34 @@ const BonkRoyaleGame = () => {
     }
   }, []);
 
+  useEffect(() => {
+    setShowMobileControls(isMobile);
+  }, [isMobile]);
+
+  useEffect(() => {
+    recordLogin();
+    trackEvent('game_start');
+    const status = getDailyRewardStatus();
+    setDailyRewardStatus(status);
+    if (status.canClaim) {
+      setShowDailyReward(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    setDailyRewardStatus(getDailyRewardStatus());
+  }, [progressTick]);
+
+  useEffect(() => {
+    if (gamePhase === 'gameOver' && prevGamePhaseRef.current !== 'gameOver') {
+      const isPlayerAlive = stateRef.current?.players.find((p) => p.isPlayer)?.alive;
+      if (isPlayerAlive === false) {
+        playSound('level_lose');
+      }
+    }
+    prevGamePhaseRef.current = gamePhase;
+  }, [gamePhase]);
+
   // Selective Scroller Locking: Lock only when in the arena
   useEffect(() => {
     const isArenaActive = selectedChar && !inLobby;
@@ -158,19 +206,19 @@ const BonkRoyaleGame = () => {
   }, [selectedChar, inLobby]);
 
   const getCanvasSize = useCallback(() => {
-    const isMobile = window.innerWidth < 768;
-    const w = isMobile ? window.innerWidth : Math.min(window.innerWidth, 900);
-    const h = isMobile ? window.innerHeight : Math.min(window.innerHeight - 60, 700);
+    const smallScreen = isMobile || window.innerWidth < 768;
+    const w = smallScreen ? window.innerWidth : Math.min(window.innerWidth, 900);
+    const h = smallScreen ? window.innerHeight : Math.min(window.innerHeight - 60, 700);
     return { w, h };
-  }, []);
+  }, [isMobile]);
 
   const handleSoundEvents = useCallback((events: SoundEvent[]) => {
     for (const e of events) {
       switch (e) {
-        case 'bonk': playBonkSound(); break;
+        case 'bonk': playBonkSound(); updateDailyChallenge('bonks'); break;
         case 'elimination': playEliminationSound(); break;
         case 'powerup': playPowerUpSound(); break;
-        case 'victory': playVictorySound(); break;
+        case 'victory': playVictorySound(); updateDailyChallenge('wins'); break;
         case 'defeat': playDefeatSound(); break;
       }
     }
@@ -181,7 +229,7 @@ const BonkRoyaleGame = () => {
     if (!stateRef.current || scoreSaved) return;
     const state = stateRef.current;
     if (state.phase === 'gameOver' && selectedChar) {
-      const entries = addScore(selectedChar.name, state.playerScore, state.round);
+      const entries = addScore(selectedChar.character.name, state.playerScore, state.round);
       setLeaderboard(entries);
       setScoreSaved(true);
     }
@@ -213,9 +261,32 @@ const BonkRoyaleGame = () => {
       
       setStarsEarned(stars);
       saveLevelCompletion(selectedLevel, stars, finalTimes * 1000);
+      
+      // Add rewards
+      const xpGained = stars * 100 + Math.floor(finalTimes / 10);
+      addXP(xpGained);
+      addCoins(stars * 50);
+      if (selectedChar) {
+        addCharacterXP(selectedChar.character.id, xpGained / 2);
+      }
+      updateDailyChallenge('survive', Math.floor(finalTimes));
+
+      trackEvent('level_complete', {
+        level: selectedLevel,
+        stars,
+        time: finalTimes,
+      });
+      
+      // Chance for loot box (30% chance)
+      if (Math.random() < 0.3) {
+        addLootBox(1);
+      }
+      
+      playSound('level_win');
     };
 
-    stateRef.current = createInitialState(w, h, selectedChar, isMultiplayer, 1, selectedLevel || 0, maxTime);
+    const initialNextBoss = Math.floor(Math.random() * 3) + 3;
+    stateRef.current = createInitialState(w, h, selectedChar, isMultiplayer, 1, selectedLevel || 0, maxTime, initialNextBoss, gameMode);
     if (networkManager.role !== 'client') {
       stateRef.current.phase = 'stage1Intro';
       stateRef.current.countdownTimer = 5.0;
@@ -237,9 +308,11 @@ const BonkRoyaleGame = () => {
           if (stateRef.current.phase === 'playing') {
             stateRef.current.phase = 'paused';
             setGamePhase('paused');
+            stopBackgroundMusic();
           } else if (stateRef.current.phase === 'paused') {
             stateRef.current.phase = 'playing';
             setGamePhase('playing');
+            startBackgroundMusic();
           }
         }
       }
@@ -268,20 +341,28 @@ const BonkRoyaleGame = () => {
     const onVisibilityChange = () => {
       if (!stateRef.current) return;
       if (document.hidden) {
-        if (stateRef.current.phase === 'playing') {
+        // Automatically pause solo games when the user switches tabs, receives a call, or backgrounds the app
+        if (stateRef.current.phase === 'playing' && !isMultiplayer) {
           stateRef.current.phase = 'paused';
           setGamePhase('paused');
+          stopBackgroundMusic();
         }
-      } else {
-        if (stateRef.current.phase === 'paused') {
-          stateRef.current.phase = 'playing';
-          setGamePhase('playing');
-        }
+      }
+    };
+
+    const onWindowBlur = () => {
+      if (!stateRef.current) return;
+      if (stateRef.current.phase === 'playing' && !isMultiplayer) {
+        stateRef.current.phase = 'paused';
+        setGamePhase('paused');
+        stopBackgroundMusic();
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
+
     canvas.addEventListener('click', onClick);
     document.addEventListener('visibilitychange', onVisibilityChange);
 
@@ -354,6 +435,7 @@ const BonkRoyaleGame = () => {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onWindowBlur);
       canvas.removeEventListener('click', onClick);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       cancelAnimationFrame(rafRef.current);
@@ -414,8 +496,8 @@ const BonkRoyaleGame = () => {
       const { w, h } = getCanvasSize();
       if (stateRef.current.phase === 'menu') {
         stateRef.current.phase = 'playing';
-      } else if (stateRef.current.phase === 'gameOver' && isMultiplayer) {
-        // Only allow quick restart via Bonk button in Multiplayer
+      } else if (stateRef.current.phase === 'gameOver') {
+        // Quick restart via Bonk button for all modes
         setScoreSaved(false);
         if (selectedChar) {
           stateRef.current = resetGame(stateRef.current, w, h, selectedChar, isMultiplayer);
@@ -425,6 +507,11 @@ const BonkRoyaleGame = () => {
             setGamePhase('stage1Intro');
           }
         }
+      } else if (stateRef.current.phase === 'victory') {
+         // Quick next level via Bonk button
+         if (selectedLevel && selectedLevel < 100) {
+            setSelectedLevel(selectedLevel + 1);
+         }
       }
     }
   };
@@ -459,8 +546,8 @@ const BonkRoyaleGame = () => {
   if (inLobby && selectedChar) {
     return (
       <PartyLobby 
-        playerChar={selectedChar} 
-        playerName={selectedChar.name + (Math.floor(Math.random() * 1000))}
+        playerChar={selectedChar.character} 
+        playerName={selectedChar.character.name + (Math.floor(Math.random() * 1000))}
         onGameStart={() => setInLobby(false)}
         onBack={() => {
           setSelectedChar(null);
@@ -488,7 +575,7 @@ const BonkRoyaleGame = () => {
 
   return (
 <div
-  className="fixed inset-0 bg-background select-none overflow-hidden flex items-center justify-center z-0"
+  className="fixed inset-0 bg-background select-none flex items-center justify-center z-0"
   style={{ touchAction: "none" }}
 >
       <canvas
@@ -501,6 +588,7 @@ const BonkRoyaleGame = () => {
         {/* Stage 1 Special Popup */}
         {showStage1Popup && (
           <motion.div
+            key="stage1-popup"
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 1.1 }}
@@ -535,6 +623,7 @@ const BonkRoyaleGame = () => {
       {/* Level Start Splash Banner */}
         {showLevelStart && selectedLevel && (
           <motion.div
+            key="level-start-banner"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -560,11 +649,12 @@ const BonkRoyaleGame = () => {
                 <div className="flex items-center justify-center gap-3">
                   <div className="h-px w-8 bg-white/20" />
                   <p className="text-primary font-black text-xs uppercase tracking-widest">
-                    {selectedLevel % 5 === 0 ? "🔥 BOSS BATTLE 🔥" : 
-                     selectedLevel <= 5 ? "Tutorial Zone" :
-                     selectedLevel <= 10 ? "Power Surge" :
-                     selectedLevel <= 15 ? "The Traps" :
-                     selectedLevel <= 20 ? "Motion Sickness" : "Grand Finale"}
+                    {selectedLevel ? (selectedLevel % 5 === 0 ? "🔥 BOSS BATTLE 🔥" : 
+                      selectedLevel <= 5 ? "Tutorial Zone" :
+                      selectedLevel <= 10 ? "Power Surge" :
+                      selectedLevel <= 15 ? "The Traps" :
+                      selectedLevel <= 20 ? "Motion Sickness" : "Grand Finale") :
+                     (stateRef.current?.isBossRound ? "🔥 BOSS BATTLE 🔥" : `Wave ${stateRef.current?.round || 1}`)}
                   </p>
                   <div className="h-px w-8 bg-white/20" />
                 </div>
@@ -637,11 +727,18 @@ const BonkRoyaleGame = () => {
 
       {showMobileControls && gamePhase !== 'menu' && (
         <div 
-          className="absolute inset-x-0 bottom-0 top-0 pointer-events-none z-40 select-none"
+          className="absolute inset-0 pointer-events-none z-40 select-none"
+          style={{ touchAction: 'none' }}
         >
+          {isMobile && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-black/50 border border-white/20 text-[10px] text-white/80 tracking-wider pointer-events-none drop-shadow-lg">
+              Swipe to move · Tap BOOST/BONK · Hold to dash
+            </div>
+          )}
+
           {/* Universal Native Joystick Layer - Captures touches on the left side */}
           <div 
-            className="absolute inset-y-0 left-0 w-1/2 pointer-events-auto"
+            className="absolute inset-y-0 left-0 w-2/5 pointer-events-auto"
             onTouchStart={handleJoystickStart}
             onTouchMove={handleJoystickMove}
             onTouchEnd={handleJoystickEnd}
@@ -649,13 +746,13 @@ const BonkRoyaleGame = () => {
 
           {/* Joystick Visual Component */}
           <div 
-            className={`absolute w-32 h-32 rounded-full pointer-events-none transition-opacity duration-300 flex items-center justify-center ${
+            className={`absolute w-36 h-36 sm:w-32 sm:h-32 rounded-full pointer-events-none transition-opacity duration-300 flex items-center justify-center ${
               joystickPos.active ? 'opacity-100' : 'opacity-40'
             }`}
             style={{ 
-              left: joystickPos.active ? joystickPos.x - 64 : 40, 
-              bottom: joystickPos.active ? 'auto' : 40,
-              top: joystickPos.active ? joystickPos.y - 64 : 'auto',
+              left: joystickPos.active ? joystickPos.x - 72 : 20, 
+              bottom: joystickPos.active ? 'auto' : 30,
+              top: joystickPos.active ? joystickPos.y - 72 : 'auto',
             }}
           >
             {/* Premium Native Joystick Base */}
@@ -665,7 +762,7 @@ const BonkRoyaleGame = () => {
             {/* High-Fidelity Handle */}
             <div 
               ref={stickRef}
-              className={`w-16 h-16 rounded-full bg-gradient-to-br from-white/40 via-white/20 to-transparent border border-white/50 shadow-[0_10px_25px_rgba(0,0,0,0.6)] flex items-center justify-center relative z-10 active:scale-95 ${
+              className={`w-20 h-20 sm:w-16 sm:h-16 rounded-full bg-gradient-to-br from-white/40 via-white/20 to-transparent border border-white/50 shadow-[0_10px_25px_rgba(0,0,0,0.6)] flex items-center justify-center relative z-10 active:scale-95 ${
                 !joystickPos.active ? 'opacity-50' : ''
               }`}
             >
@@ -676,11 +773,11 @@ const BonkRoyaleGame = () => {
             </div>
           </div>
 
-          <div className="absolute inset-x-0 bottom-0 flex justify-between items-end p-6 pb-12 pointer-events-none">
-            <div className="w-24 h-24" /> {/* Spacer for Joystick area */}
+          <div className="absolute inset-x-0 bottom-2 sm:bottom-4 flex justify-between items-end px-4 sm:px-6 pb-4 pointer-events-none">
+            <div className="w-28 h-28 pointer-events-none" /> {/* Spacer for Joystick area */}
 
-            {/* Micro Satellite Cluster with Unified HUD */}
-            <div className="flex flex-col items-end gap-3 pointer-events-none">
+            {/* Micro Satellite Cluster with Unified HUD - mobile right-side controls */}
+            <div className="flex flex-col items-end gap-3 pointer-events-auto">
               {/* Active Power Indicator */}
               {(() => {
                 const p = stateRef.current?.players.find((p) => p.isPlayer);
@@ -778,11 +875,11 @@ const BonkRoyaleGame = () => {
                   );
                 })()}
                 <button
-                  className={`w-16 h-16 rounded-full bg-gradient-to-br from-cyan-400 via-blue-600 to-indigo-800 text-white font-black text-[9px] shadow-[0_8px_20px_rgba(0,0,0,0.5),inset_0_2px_4px_rgba(255,255,255,0.3)] active:scale-90 transition-all pointer-events-auto border-2 border-white/20 outline outline-4 outline-white/5 flex items-center justify-center flex-col gap-0 relative overflow-hidden ${
+                  className={`w-20 h-20 sm:w-16 sm:h-16 rounded-full bg-gradient-to-br from-cyan-500 via-blue-600 to-indigo-800 text-white font-black text-[11px] sm:text-[9px] shadow-[0_8px_20px_rgba(0,0,0,0.55),inset_0_3px_6px_rgba(255,255,255,0.4)] active:scale-90 transition-all pointer-events-auto border-2 border-white/25 outline outline-4 outline-white/10 flex items-center justify-center flex-col gap-0 relative overflow-hidden ${
                     stateRef.current?.players.find((p) => p.isPlayer)
                       ?.boosterCooldown === 0
-                      ? 'shadow-[0_0_30px_rgba(6,182,212,0.6)] saturate-150 animate-pulse'
-                      : 'opacity-70 saturate-50'
+                      ? 'shadow-[0_0_30px_rgba(20,240,255,0.7)] saturate-150 animate-pulse-gentle ring-2 ring-cyan-300/40 ring-offset-2 ring-offset-transparent'
+                      : 'opacity-80 saturate-90'
                   }`}
                   onTouchStart={(e) => {
                     e.preventDefault();
@@ -804,8 +901,12 @@ const BonkRoyaleGame = () => {
 
               {/* Main Command BONK Button (Metallic Sunburst Design) */}
               <button
-                className="w-22 h-22 aspect-square rounded-full bg-gradient-to-r from-yellow-400 via-orange-500 to-red-600 text-white font-black text-base shadow-[0_12px_30px_rgba(0,0,0,0.6),inset_0_4px_8px_rgba(255,255,255,0.4)] active:scale-95 active:shadow-inner transition-all pointer-events-auto border-[3px] border-white/40 outline outline-6 outline-white/5 flex items-center justify-center uppercase tracking-tighter relative overflow-hidden group"
-                style={{ textShadow: '0 2px 5px rgba(0,0,0,0.5)', padding: 0 }}
+                className="w-24 h-24 sm:w-20 sm:h-20 aspect-square rounded-full bg-gradient-to-br from-orange-400 via-red-500 to-pink-500 text-white font-black text-base sm:text-sm shadow-[0_14px_30px_rgba(250,120,20,0.45),inset_0_4px_10px_rgba(255,255,255,0.5)] active:scale-95 active:shadow-inner transition-all pointer-events-auto border-[3px] border-white/40 outline outline-6 outline-white/10 flex items-center justify-center uppercase tracking-tighter relative overflow-hidden group ring-2 ring-orange-200/20 ${
+                  stateRef.current?.players.find((p) => p.isPlayer)?.boosterCooldown === 0
+                    ? 'animate-pulse-gentle ring-4 ring-orange-300/30'
+                    : ''
+                }"
+                style={{ textShadow: '0 3px 8px rgba(0,0,0,0.5)', padding: 0 }}
                 onTouchStart={(e) => {
                   e.preventDefault();
                   handleBonkBtn();
@@ -839,6 +940,39 @@ const BonkRoyaleGame = () => {
             </h1>
             <p className="text-white/50 text-xs mb-6 sm:mb-10 font-bold tracking-[0.3em] uppercase">Multiplayer Arena Battle</p>
             
+            {/* Progress Display */}
+            <div className="mb-6 bg-white/5 p-4 rounded-2xl border border-white/10">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-white/70 text-sm">Level {loadProgress().playerLevel}</span>
+                <span className="text-yellow-400 text-sm">{loadProgress().totalCoins} 🪙</span>
+              </div>
+              <div className="w-full bg-white/10 rounded-full h-2">
+                <div className="bg-gradient-to-r from-yellow-400 to-orange-500 h-2 rounded-full" style={{ width: `${((loadProgress().totalXP % 1000) / 1000) * 100}%` }}></div>
+              </div>
+            </div>
+            
+            {/* Daily Challenges */}
+            <div className="mb-6">
+              <p className="text-white/70 text-sm mb-3 font-bold uppercase tracking-wider">Daily Challenges</p>
+              <div className="space-y-2">
+                {getDailyChallenges().map(challenge => (
+                  <div key={challenge.id} className="bg-white/5 p-3 rounded-xl border border-white/10">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-white text-xs">{challenge.description}</span>
+                      <span className="text-yellow-400 text-xs">{challenge.reward} 🪙</span>
+                    </div>
+                    <div className="w-full bg-white/10 rounded-full h-1">
+                      <div 
+                        className="bg-gradient-to-r from-green-400 to-blue-500 h-1 rounded-full" 
+                        style={{ width: `${Math.min((challenge.progress / challenge.target) * 100, 100)}%` }}
+                      ></div>
+                    </div>
+                    <div className="text-white/50 text-xs mt-1">{challenge.progress}/{challenge.target}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            
             <div className="grid grid-cols-1 gap-3 sm:gap-4 mb-8 sm:mb-12">
               <div className="flex items-center gap-4 bg-white/5 p-4 rounded-3xl border border-white/10 group hover:bg-white/10 transition-colors">
                 <div className="w-14 h-14 bg-gradient-to-br from-cyan-400 to-blue-600 rounded-2xl flex items-center justify-center text-2xl shadow-lg group-hover:scale-110 transition-transform">🕹️</div>
@@ -858,6 +992,7 @@ const BonkRoyaleGame = () => {
 
             <button 
               onClick={() => { 
+                playSound('click');
                 const newPhase = isMultiplayer ? 'playing' : 'levelSelect';
                 if (stateRef.current) {
                   stateRef.current.phase = newPhase;
@@ -870,6 +1005,28 @@ const BonkRoyaleGame = () => {
               <span className="relative z-10 flex items-center justify-center gap-2">
                 START BATTLE <span className="text-2xl">→</span>
               </span>
+            </button>
+
+            <button
+              onClick={() => {
+                playSound('click');
+                setShowStore(true);
+                trackEvent('store_open');
+              }}
+              className="w-full h-12 mt-3 bg-white/5 border border-white/15 rounded-3xl text-white/80 font-black text-sm uppercase tracking-[0.3em] hover:bg-white/10 active:scale-95 transition-all"
+            >
+              Open Store
+            </button>
+
+            <button
+              onClick={() => {
+                playSound('click');
+                const nextMuted = toggleSoundMuted();
+                setSoundMuted(nextMuted);
+              }}
+              className="w-full h-12 mt-2 bg-white/5 border border-white/15 rounded-3xl text-white/80 font-black text-sm uppercase tracking-[0.3em] hover:bg-white/10 active:scale-95 transition-all"
+            >
+              {soundMuted ? 'Sound Off' : 'Sound On'}
             </button>
           </motion.div>
         </div>
@@ -1115,6 +1272,37 @@ const BonkRoyaleGame = () => {
               })}
             </div>
 
+            {/* Loot Box Section */}
+            {loadProgress().lootBoxes > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 1.0 }}
+                className="mt-6 p-4 bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-400/30 rounded-2xl"
+              >
+                <div className="flex items-center justify-center gap-3 mb-3">
+                  <span className="text-2xl">🎁</span>
+                  <span className="text-white font-bold">Loot Boxes Available: {loadProgress().lootBoxes}</span>
+                </div>
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => {
+                    const reward = openLootBox();
+                    if (reward.type !== 'none') {
+                      setLootBoxReward(reward);
+                      setShowLootBox(true);
+                      trackEvent('lootbox_open', { source: 'victory' });
+                      setProgressTick((v) => v + 1);
+                    }
+                  }}
+                  className="w-full py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl text-white font-bold text-lg shadow-lg hover:shadow-xl transition-all"
+                >
+                  🎁 OPEN LOOT BOX
+                </motion.button>
+              </motion.div>
+            )}
+
             <div className="flex flex-col gap-4 mt-8">
               <motion.button 
                 initial={{ opacity: 0, y: 20 }}
@@ -1169,6 +1357,72 @@ const BonkRoyaleGame = () => {
           </motion.div>
         </div>
       )}
+
+      <LootboxRewardModal
+        open={showLootBox}
+        reward={lootBoxReward}
+        onClose={() => {
+          setShowLootBox(false);
+          setLootBoxReward(null);
+        }}
+      />
+
+      <Store
+        open={showStore}
+        coins={progressSnapshot.totalCoins}
+        lootBoxes={progressSnapshot.lootBoxes}
+        lootboxCost={300}
+        onClose={() => setShowStore(false)}
+        onBuyCoins={(amount) => {
+          addCoins(amount);
+          setProgressTick((v) => v + 1);
+        }}
+        onBuyLootbox={() => {
+          const reward = purchaseAndOpenLootBox(300);
+          if (reward && reward.type !== 'none') {
+            setLootBoxReward(reward);
+            setShowLootBox(true);
+            trackEvent('lootbox_open', { source: 'store' });
+            setProgressTick((v) => v + 1);
+          }
+        }}
+        onOpenLootbox={() => {
+          const reward = openLootBox();
+          if (reward.type !== 'none') {
+            setLootBoxReward(reward);
+            setShowLootBox(true);
+            trackEvent('lootbox_open', { source: 'inventory' });
+            setProgressTick((v) => v + 1);
+          }
+        }}
+      />
+
+      <DailyRewardModal
+        open={showDailyReward && !!dailyRewardStatus}
+        reward={dailyRewardStatus?.reward || null}
+        currentStreak={dailyRewardStatus?.currentStreak || 0}
+        nextStreak={dailyRewardStatus?.nextStreak || 1}
+        onClose={() => setShowDailyReward(false)}
+        onClaim={() => {
+          const claimed = claimDailyReward();
+          if (!claimed) return;
+          trackEvent('reward_claimed', {
+            day: claimed.streak,
+            type: claimed.reward.type,
+            amount: claimed.reward.amount,
+          });
+          setShowDailyReward(false);
+          setProgressTick((v) => v + 1);
+          if (claimed.reward.type === 'lootbox') {
+            const reward = openLootBox();
+            if (reward.type !== 'none') {
+              setLootBoxReward(reward);
+              setShowLootBox(true);
+              trackEvent('lootbox_open', { source: 'daily_reward' });
+            }
+          }
+        }}
+      />
 
       {/* 4. Leaderboard overlay (Manual Toggle) */}
       {showLeaderboard && (

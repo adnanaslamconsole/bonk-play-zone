@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CharacterDef } from './characters';
-import { networkManager } from './NetworkManager';
+import { CharacterDef } from './characters';import { SelectedCharacter } from './types';import { networkManager } from './NetworkManager';
 
 interface PartyLobbyProps {
   playerChar: CharacterDef;

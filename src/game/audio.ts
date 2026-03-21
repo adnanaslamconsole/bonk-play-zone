@@ -123,6 +123,25 @@ export function playVictorySound() {
   });
 }
 
+export function playAchievementSound() {
+  const ctx = getCtx();
+  // Triumphant fanfare notes
+  const notes = [523, 659, 784, 1047, 784, 1047, 1319]; // C5, E5, G5, C6, G5, C6, E6
+  notes.forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sawtooth';
+    osc.frequency.value = freq;
+    const t = ctx.currentTime + i * 0.15;
+    gain.gain.setValueAtTime(0.2, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    osc.start(t);
+    osc.stop(t + 0.4);
+  });
+}
+
 export function playDefeatSound() {
   const ctx = getCtx();
   const notes = [400, 350, 300, 200];
@@ -256,19 +275,4 @@ export function stopBackgroundMusic() {
     musicGain.gain.exponentialRampToValueAtTime(0.001, getCtx().currentTime + 0.5);
     setTimeout(() => { musicGain = null; }, 600);
   }
-}
-
-export function playSelectSound() {
-  const ctx = getCtx();
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.connect(gain);
-  gain.connect(ctx.destination);
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(600, ctx.currentTime);
-  osc.frequency.exponentialRampToValueAtTime(900, ctx.currentTime + 0.08);
-  gain.gain.setValueAtTime(0.15, ctx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
-  osc.start(ctx.currentTime);
-  osc.stop(ctx.currentTime + 0.12);
 }
